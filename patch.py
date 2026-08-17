@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import importlib
 import struct
+import keystone
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -598,24 +599,6 @@ class PeLayout:
     sections: tuple[Section, ...]
 
 
-def load_keystone() -> ModuleType:
-    """Load the Keystone Python binding lazily.
-
-    Returns:
-        Imported `keystone` module supplied by the `keystone-engine` package.
-
-    Raises:
-        RuntimeError: If `keystone-engine` is not installed.
-    """
-    try:
-        return importlib.import_module("keystone")
-    except ImportError as exc:
-        raise RuntimeError(
-            "keystone-engine is required to build the patch. "
-            "Install it with: python -m pip install keystone-engine==0.9.2"
-        ) from exc
-
-
 def strip_assembly_comments(source: str) -> str:
     """Remove human-readable `#` comments before passing assembly to Keystone.
 
@@ -644,7 +627,6 @@ def assemble_x86_64(source: str, address: int) -> bytes:
         Exact machine-code bytes emitted by Keystone.
     """
     assert 0 <= address < 1 << 64
-    keystone = load_keystone()
     engine = keystone.Ks(keystone.KS_ARCH_X86, keystone.KS_MODE_64)
     engine.syntax = keystone.KS_OPT_SYNTAX_INTEL
     encoding, _ = engine.asm(strip_assembly_comments(source), address)
