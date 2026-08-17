@@ -5,61 +5,53 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import struct
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 
 EXPECTED_SHA256 = "3bfdbad16ddf47e2e9d303294c9f6de90eb90f6856bc0126e27bc1bd30e4e884"
 EXPECTED_IMAGE_BASE = 0x140000000
 EXPECTED_NEW_SECTION_RVA = 0x280000
 EXPECTED_CERTIFICATE_OFFSET = 0x274600
 MANIFEST_DATA_ENTRY_OFFSET = 0x235970
+HIDPI_CODE_SIZE = 0x4CD
+HIDPI_CODE_BASE_VA = EXPECTED_IMAGE_BASE + EXPECTED_NEW_SECTION_RVA
 
-HIDPI_CODE = bytes.fromhex(
-    "534883ec204889cb488d0de1030000ff150bf7f4ff4885c0741e4889c1488d15e2030000ff150ef7f4ff4885c074094889d9ffd085c07505b8600000004883c4205bc366662e0f1f840000000000669039c80f42c14883ec3089442420498b8d"
-    "70080000e897ffffff89c28b4c242041b860000000ff150df6f4ff4883c430e95e09ddff66662e0f1f840000000000904883ec3089442420488b8f70080000e85cffffff89c2b90500000041b860000000ff15d1f5f4ff4189c2448b5c242048"
-    "83c430448b4c24444530f6448b4424404501d18b5424484501d04429d244898fc40900004589dd448987c00900008997c8090000e97009ddff0f1f80000000004883ec40894c2420448944242444894c2428488b8f70080000e8e2feffff89c2"
-    "b96400000041b860000000ff1557f5f4ff4189c28b4c2420448b442424448b4c24284883c44089c84429d04439e8e98709ddff66662e0f1f84000000000066904883ec40894c2420448944242444894c2428488b8f70080000e882feffff89c2"
-    "b90500000041b860000000ff15f7f4f4ff4189c28b4c2420448b442424448b4c24284883c4404429e94429d1898fc8090000e93109ddff660f1f8400000000004883ec30894c2420488b8f70080000e82cfeffff89c2b93c00000041b8600000"
-    "00ff15a1f4f4ff4189c24189c18b4c24204883c430e93a09ddff660f1f440000488d8f9007000089c24429d2e94709ddff66662e0f1f8400000000000f1f40004883ec4089442420894c24244489442428488b8f70080000e8c3fdffff89c2b9"
-    "3c00000041b860000000ff1538f4f4ff4189c2448b5c24208b4c2424448b4424284883c4404489da4429d2488b8710080000e9c809ddff660f1f8400000000004883ec30498b8f80080000e870fdffff894424208b4d108b54242041b8600000"
-    "00ff15e1f3f4ff8945108b4d148b54242041b860000000ff15cbf3f4ff894514488d4d10ff15feeef4ff4883c430e916bdddff66662e0f1f84000000000066904883ec40498b8f80080000e810fdffff89442420b9050000008b54242041b860"
-    "000000ff157ff3f4ff89442424b9160000008b54242041b860000000ff1566f3f4ff89442428b90f0000008b54242041b860000000ff154df3f4ff448b542424448b5c24284883c4408b4c24604401d18b5424644401d2448b45c04501d84101"
-    "c8458d2c00448b4d90440faf4dc44501d94101d1e950d2ddff0f1f80000000004883ec40498b8f80080000e870fcffff89442420b90d0000008b54242041b860000000ff15dff2f4ff89442424b9110000008b54242041b860000000ff15c6f2"
-    "f4ff448b5424244189c34883c4408b5c24644401d38b7424604401dee949d2ddff66662e0f1f8400000000000f1f40007500730065007200330032002e0064006c006c000000476574447069466f7257696e646f770090660f1f840000000000"
-    "4883ec60894c243048895424384c894424404c894c2448498b8f80080000e8bdfbffff89442450488d0da2ffffffff15ccf2f4ff4885c074364889c1488d154f000000ff15cff2f4ff4885c074218b4c2430488b5424384c8b4424404c8b4c24"
-    "48448b5424504489542420ffd0eb198b4c2430488b5424384c8b4424404c8b4c2448ff1520f8f4ff4883c460e99bbaddff9053797374656d506172616d6574657273496e666f466f7244706900"
-)
+USER32_DLL_OFFSET = 0x03F0
+GET_DPI_FOR_WINDOW_NAME_OFFSET = 0x0406
+SYSTEM_PARAMETERS_INFO_FOR_DPI_NAME_OFFSET = 0x04B2
 
 HIDPI_SYMBOL_OFFSETS = {
-    "graph_height":    0x0050,
-    "main_margins":    0x0090,
-    "graph_threshold": 0x0100,
-    "graph_gap":       0x0160,
-    "load1_width":     0x01C0,
-    "load1_x":         0x0200,
-    "load2_x":         0x0220,
+    "graph_height":           0x0050,
+    "main_margins":           0x0090,
+    "graph_threshold":        0x0100,
+    "graph_gap":              0x0160,
+    "load1_width":            0x01C0,
+    "load1_x":                0x0200,
+    "load2_x":                0x0220,
+    "card_rect":              0x02E0,
+    "card_text":              0x0380,
     "system_parameters_info": 0x0420,
-    "card_rect":       0x02E0,
-    "card_text":       0x0380,
 }
 
 PATCH_SITES = {
-    "graph_height": (0x0509DD, bytes.fromhex("3bc10f42c1")),
-    "main_margins": (0x050A36, bytes.fromhex("448b4c24444532f6448b4424404183c1058b5424484183c00583c2fb44898fc4090000448be8448987c00900008997c8090000")),
-    "graph_threshold": (0x050AD4, bytes.fromhex("8d419c413bc5")),
-    "graph_gap": (0x050ADC, bytes.fromhex("412bcd83c1fb898fc8090000")),
-    "load1_width": (0x050B2E, bytes.fromhex("41b93c000000")),
-    "load1_x": (0x050B4E, bytes.fromhex("488d8f900700008d50c4")),
-    "load2_x": (0x050C35, bytes.fromhex("8d50c4488b8710080000")),
-    "load2_width": (0x050C4D, bytes.fromhex("41b93c000000")),
+    "graph_height":           (0x0509DD, bytes.fromhex("3bc10f42c1")),
+    "main_margins":           (0x050A36, bytes.fromhex("448b4c24444532f6448b4424404183c1058b5424484183c00583c2fb44898fc4090000448be8448987c00900008997c8090000")),
+    "graph_threshold":        (0x050AD4, bytes.fromhex("8d419c413bc5")),
+    "graph_gap":              (0x050ADC, bytes.fromhex("412bcd83c1fb898fc8090000")),
+    "load1_width":            (0x050B2E, bytes.fromhex("41b93c000000")),
+    "load1_x":                (0x050B4E, bytes.fromhex("488d8f900700008d50c4")),
+    "load2_x":                (0x050C35, bytes.fromhex("8d50c4488b8710080000")),
+    "load2_width":            (0x050C4D, bytes.fromhex("41b93c000000")),
     "system_parameters_info": (0x05BF46, bytes.fromhex("ff157c3d1700")),
-    "card_rect": (0x05D59C, bytes.fromhex("8b4c246083c1058b54246483c205448b45c04183c0164403c1458d680f448b4d90440faf4dc44183c1164403ca")),
-    "card_text": (0x05D61C, bytes.fromhex("8b5c246483c30d8b74246083c611")),
+    "card_rect":              (0x05D59C, bytes.fromhex("8b4c246083c1058b54246483c205448b45c04183c0164403c1458d680f448b4d90440faf4dc44183c1164403ca")),
+    "card_text":              (0x05D61C, bytes.fromhex("8b5c246483c30d8b74246083c611")),
 }
 
 UNWIND_PARENT_GRAPH_HEIGHT = (0x050870, 0x0509F0, 0x20295C)
-UNWIND_PARENT_MAIN_LAYOUT = (0x0509F0, 0x0521BE, 0x202978)
+UNWIND_PARENT_MAIN_LAYOUT  = (0x0509F0, 0x0521BE, 0x202978)
 UNWIND_PARENT_GRAPH_RENDERER = (0x05BE30, 0x05E8EF, 0x20348C)
 
 HIDPI_CHAINED_RANGES = (
@@ -77,18 +69,344 @@ HIDPI_CHAINED_RANGES = (
     ("load1_x",                0x0200, 0x0211, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
     ("load2_x_body",           0x0220, 0x0261, 0x40, UNWIND_PARENT_MAIN_LAYOUT),
     ("load2_x_suffix",         0x0261, 0x0277, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
-    ("system_parameters_body", 0x0420, 0x04A8, 0x60, UNWIND_PARENT_GRAPH_RENDERER),
-    ("system_parameters_tail", 0x04A8, 0x04B1, 0x00, UNWIND_PARENT_GRAPH_RENDERER),
     ("card_rect_body",         0x02E0, 0x0345, 0x40, UNWIND_PARENT_GRAPH_RENDERER),
     ("card_rect_suffix",       0x0345, 0x0379, 0x00, UNWIND_PARENT_GRAPH_RENDERER),
     ("card_text_body",         0x0380, 0x03CA, 0x40, UNWIND_PARENT_GRAPH_RENDERER),
     ("card_text_suffix",       0x03CA, 0x03E1, 0x00, UNWIND_PARENT_GRAPH_RENDERER),
+    ("system_parameters_body", 0x0420, 0x04A8, 0x60, UNWIND_PARENT_GRAPH_RENDERER),
+    ("system_parameters_tail", 0x04A8, 0x04B1, 0x00, UNWIND_PARENT_GRAPH_RENDERER),
+)
+
+
+@dataclass(frozen=True)
+class AssemblyBlock:
+    """One injected x86-64 routine assembled at a fixed offset.
+
+    Attributes:
+        name: Stable symbolic name used by tests and diagnostics.
+        offset: Byte offset from the beginning of the `.hidpi` section.
+        end_offset: Exclusive byte offset expected after assembly.
+        source: Intel-syntax x86-64 assembly. Lines may contain `#` comments.
+    """
+
+    name: str
+    offset: int
+    end_offset: int
+    source: str
+
+
+HIDPI_ASSEMBLY_BLOCKS = (
+    AssemblyBlock(
+        "get_dpi",
+        0x0000,
+        0x0043,
+        r"""
+push rbx
+sub rsp, 0x20
+mov rbx, rcx
+lea rcx, [rip + 0x3e1]                    # L"user32.dll"
+call qword ptr [rip - 0xb08f5]            # IAT GetModuleHandleW @ 0x141cf720
+test rax, rax
+je fallback
+mov rcx, rax
+lea rdx, [rip + 0x3e2]                    # "GetDpiForWindow"
+call qword ptr [rip - 0xb08f2]            # IAT GetProcAddress @ 0x141cf738
+test rax, rax
+je fallback
+mov rcx, rbx
+call rax                                  # GetDpiForWindow(hwnd)
+test eax, eax
+jne done
+fallback:
+mov eax, 0x60                             # USER_DEFAULT_SCREEN_DPI
+done:
+add rsp, 0x20
+pop rbx
+ret
+""",
+    ),
+    AssemblyBlock(
+        "graph_height",
+        0x0050,
+        0x0084,
+        r"""
+cmp eax, ecx
+cmovb eax, ecx
+sub rsp, 0x30
+mov dword ptr [rsp + 0x20], eax
+mov rcx, qword ptr [r13 + 0x870]
+call 0x140280000                           # get_dpi(hwnd)
+mov edx, eax
+mov ecx, dword ptr [rsp + 0x20]
+mov r8d, 0x60
+call qword ptr [rip - 0xb09f3]            # IAT MulDiv @ 0x141cf688
+add rsp, 0x30
+jmp 0x1400509e2                           # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "main_margins",
+        0x0090,
+        0x00F9,
+        r"""
+sub rsp, 0x30
+mov dword ptr [rsp + 0x20], eax
+mov rcx, qword ptr [rdi + 0x870]
+call 0x140280000                           # get_dpi(hwnd)
+mov edx, eax
+mov ecx, 0x5
+mov r8d, 0x60
+call qword ptr [rip - 0xb0a2f]            # MulDiv(5, dpi, 96)
+mov r10d, eax
+mov r11d, dword ptr [rsp + 0x20]
+add rsp, 0x30
+mov r9d, dword ptr [rsp + 0x44]
+xor r14b, r14b
+mov r8d, dword ptr [rsp + 0x40]
+add r9d, r10d
+mov edx, dword ptr [rsp + 0x48]
+add r8d, r10d
+sub edx, r10d
+mov dword ptr [rdi + 0x9c4], r9d
+mov r13d, r11d
+mov dword ptr [rdi + 0x9c0], r8d
+mov dword ptr [rdi + 0x9c8], edx
+jmp 0x140050a69                           # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "graph_threshold",
+        0x0100,
+        0x0153,
+        r"""
+sub rsp, 0x40
+mov dword ptr [rsp + 0x20], ecx
+mov dword ptr [rsp + 0x24], r8d
+mov dword ptr [rsp + 0x28], r9d
+mov rcx, qword ptr [rdi + 0x870]
+call 0x140280000                           # get_dpi(hwnd)
+mov edx, eax
+mov ecx, 0x64
+mov r8d, 0x60
+call qword ptr [rip - 0xb0aa9]            # MulDiv(100, dpi, 96)
+mov r10d, eax
+mov ecx, dword ptr [rsp + 0x20]
+mov r8d, dword ptr [rsp + 0x24]
+mov r9d, dword ptr [rsp + 0x28]
+add rsp, 0x40
+mov eax, ecx
+sub eax, r10d
+cmp eax, r13d
+jmp 0x140050ada                           # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "graph_gap",
+        0x0160,
+        0x01B7,
+        r"""
+sub rsp, 0x40
+mov dword ptr [rsp + 0x20], ecx
+mov dword ptr [rsp + 0x24], r8d
+mov dword ptr [rsp + 0x28], r9d
+mov rcx, qword ptr [rdi + 0x870]
+call 0x140280000                           # get_dpi(hwnd)
+mov edx, eax
+mov ecx, 0x5
+mov r8d, 0x60
+call qword ptr [rip - 0xb0b09]            # MulDiv(5, dpi, 96)
+mov r10d, eax
+mov ecx, dword ptr [rsp + 0x20]
+mov r8d, dword ptr [rsp + 0x24]
+mov r9d, dword ptr [rsp + 0x28]
+add rsp, 0x40
+sub ecx, r13d
+sub ecx, r10d
+mov dword ptr [rdi + 0x9c8], ecx
+jmp 0x140050ae8                           # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "load1_width",
+        0x01C0,
+        0x01FA,
+        r"""
+sub rsp, 0x30
+mov dword ptr [rsp + 0x20], ecx
+mov rcx, qword ptr [rdi + 0x870]
+call 0x140280000                           # get_dpi(hwnd)
+mov edx, eax
+mov ecx, 0x3c
+mov r8d, 0x60
+call qword ptr [rip - 0xb0b5f]            # MulDiv(60, dpi, 96)
+mov r10d, eax
+mov r9d, eax
+mov ecx, dword ptr [rsp + 0x20]
+add rsp, 0x30
+jmp 0x140050b34                           # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "load1_x",
+        0x0200,
+        0x0211,
+        r"""
+lea rcx, [rdi + 0x790]                    # Bitsum_LoadDisplay #1
+mov edx, eax
+sub edx, r10d
+jmp 0x140050b58                           # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "load2_x",
+        0x0220,
+        0x0277,
+        r"""
+sub rsp, 0x40
+mov dword ptr [rsp + 0x20], eax
+mov dword ptr [rsp + 0x24], ecx
+mov dword ptr [rsp + 0x28], r8d
+mov rcx, qword ptr [rdi + 0x870]
+call 0x140280000                           # get_dpi(hwnd)
+mov edx, eax
+mov ecx, 0x3c
+mov r8d, 0x60
+call qword ptr [rip - 0xb0bc8]            # MulDiv(60, dpi, 96)
+mov r10d, eax
+mov r11d, dword ptr [rsp + 0x20]
+mov ecx, dword ptr [rsp + 0x24]
+mov r8d, dword ptr [rsp + 0x28]
+add rsp, 0x40
+mov edx, r11d
+sub edx, r10d
+mov rax, qword ptr [rdi + 0x810]
+jmp 0x140050c3f                           # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "card_rect",
+        0x02E0,
+        0x0379,
+        r"""
+sub rsp, 0x40
+mov rcx, qword ptr [r15 + 0x880]
+call 0x140280000                           # get_dpi(hwnd)
+mov dword ptr [rsp + 0x20], eax
+mov ecx, 0x5
+mov edx, dword ptr [rsp + 0x20]
+mov r8d, 0x60
+call qword ptr [rip - 0xb0c81]            # MulDiv(5, dpi, 96)
+mov dword ptr [rsp + 0x24], eax
+mov ecx, 0x16
+mov edx, dword ptr [rsp + 0x20]
+mov r8d, 0x60
+call qword ptr [rip - 0xb0c9a]            # MulDiv(22, dpi, 96)
+mov dword ptr [rsp + 0x28], eax
+mov ecx, 0xf
+mov edx, dword ptr [rsp + 0x20]
+mov r8d, 0x60
+call qword ptr [rip - 0xb0cb3]            # MulDiv(15, dpi, 96)
+mov r10d, dword ptr [rsp + 0x24]
+mov r11d, dword ptr [rsp + 0x28]
+add rsp, 0x40
+mov ecx, dword ptr [rsp + 0x60]
+add ecx, r10d
+mov edx, dword ptr [rsp + 0x64]
+add edx, r10d
+mov r8d, dword ptr [rbp - 0x40]
+add r8d, r11d
+add r8d, ecx
+lea r13d, [r8 + rax]
+mov r9d, dword ptr [rbp - 0x70]
+imul r9d, dword ptr [rbp - 0x3c]
+add r9d, r11d
+add r9d, edx
+jmp 0x14005d5c9                           # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "card_text",
+        0x0380,
+        0x03E1,
+        r"""
+sub rsp, 0x40
+mov rcx, qword ptr [r15 + 0x880]
+call 0x140280000                           # get_dpi(hwnd)
+mov dword ptr [rsp + 0x20], eax
+mov ecx, 0xd
+mov edx, dword ptr [rsp + 0x20]
+mov r8d, 0x60
+call qword ptr [rip - 0xb0d21]            # MulDiv(13, dpi, 96)
+mov dword ptr [rsp + 0x24], eax
+mov ecx, 0x11
+mov edx, dword ptr [rsp + 0x20]
+mov r8d, 0x60
+call qword ptr [rip - 0xb0d3a]            # MulDiv(17, dpi, 96)
+mov r10d, dword ptr [rsp + 0x24]
+mov r11d, eax
+add rsp, 0x40
+mov ebx, dword ptr [rsp + 0x64]
+add ebx, r10d
+mov esi, dword ptr [rsp + 0x60]
+add esi, r11d
+jmp 0x14005d62a                           # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "system_parameters_info",
+        0x0420,
+        0x04B1,
+        r"""
+sub rsp, 0x60
+mov dword ptr [rsp + 0x30], ecx
+mov qword ptr [rsp + 0x38], rdx
+mov qword ptr [rsp + 0x40], r8
+mov qword ptr [rsp + 0x48], r9
+mov rcx, qword ptr [r15 + 0x880]
+call 0x140280000                           # get_dpi(hwnd)
+mov dword ptr [rsp + 0x50], eax
+lea rcx, [rip - 0x5e]                     # L"user32.dll"
+call qword ptr [rip - 0xb0d34]            # IAT GetModuleHandleW
+test rax, rax
+je fallback
+mov rcx, rax
+lea rdx, [rip + 0x4f]                     # "SystemParametersInfoForDpi"
+call qword ptr [rip - 0xb0d31]            # IAT GetProcAddress
+test rax, rax
+je fallback
+mov ecx, dword ptr [rsp + 0x30]
+mov rdx, qword ptr [rsp + 0x38]
+mov r8, qword ptr [rsp + 0x40]
+mov r9, qword ptr [rsp + 0x48]
+mov r10d, dword ptr [rsp + 0x50]
+mov dword ptr [rsp + 0x20], r10d           # fifth arg: dpi
+call rax                                  # SystemParametersInfoForDpi(...)
+jmp done
+fallback:
+mov ecx, dword ptr [rsp + 0x30]
+mov rdx, qword ptr [rsp + 0x38]
+mov r8, qword ptr [rsp + 0x40]
+mov r9, qword ptr [rsp + 0x48]
+call qword ptr [rip - 0xb07e0]            # IAT SystemParametersInfoW
+done:
+add rsp, 0x60
+jmp 0x14005bf4c                           # original continuation
+""",
+    ),
 )
 
 
 @dataclass(frozen=True)
 class Section:
-    """A PE section required for RVA/file-offset translation."""
+    """A PE section required for RVA/file-offset translation.
+
+    Attributes:
+        name: Section name with trailing NUL bytes removed.
+        virtual_size: Mapped size requested by the PE section header.
+        virtual_address: RVA at which the section is mapped.
+        raw_size: File-backed size of the section.
+        raw_offset: File offset of the section's first byte.
+    """
 
     name: str
     virtual_size: int
@@ -99,7 +417,21 @@ class Section:
 
 @dataclass(frozen=True)
 class PeLayout:
-    """PE header offsets and alignment values used by this patch."""
+    """PE header offsets and alignment values used by this patch.
+
+    Attributes:
+        pe_offset: File offset of the PE signature.
+        optional_offset: File offset of the PE32+ optional header.
+        section_table_offset: File offset of the section-header array.
+        section_count: Number of original PE sections.
+        section_alignment: In-memory section alignment.
+        file_alignment: On-disk section alignment.
+        image_base: Preferred image base.
+        size_of_headers: File-backed PE-header size.
+        exception_directory_offset: File offset of the exception data-directory entry.
+        security_directory_offset: File offset of the Authenticode data-directory entry.
+        sections: Parsed original section headers.
+    """
 
     pe_offset: int
     optional_offset: int
@@ -114,6 +446,109 @@ class PeLayout:
     sections: tuple[Section, ...]
 
 
+def load_keystone() -> ModuleType:
+    """Load the Keystone Python binding lazily.
+
+    Returns:
+        Imported `keystone` module supplied by the `keystone-engine` package.
+
+    Raises:
+        RuntimeError: If `keystone-engine` is not installed.
+    """
+    try:
+        return importlib.import_module("keystone")
+    except ImportError as exc:
+        raise RuntimeError(
+            "keystone-engine is required to build the patch. "
+            "Install it with: python -m pip install keystone-engine==0.9.2"
+        ) from exc
+
+
+def strip_assembly_comments(source: str) -> str:
+    """Remove human-readable `#` comments before passing assembly to Keystone.
+
+    Args:
+        source: Intel-syntax assembly source that may contain trailing `#` comments.
+
+    Returns:
+        Assembly source containing only labels and instructions.
+    """
+    lines = []
+    for source_line in source.splitlines():
+        instruction = source_line.split("#", 1)[0].strip()
+        if instruction:
+            lines.append(instruction)
+    return "\n".join(lines)
+
+
+def assemble_x86_64(source: str, address: int) -> bytes:
+    """Assemble Intel-syntax x86-64 source with Keystone.
+
+    Args:
+        source: Assembly source. Local labels are allowed; `#` comments are stripped first.
+        address: Virtual address of the first emitted instruction, used for relative branches.
+
+    Returns:
+        Exact machine-code bytes emitted by Keystone.
+    """
+    assert 0 <= address < 1 << 64
+    keystone = load_keystone()
+    engine = keystone.Ks(keystone.KS_ARCH_X86, keystone.KS_MODE_64)
+    engine.syntax = keystone.KS_OPT_SYNTAX_INTEL
+    encoding, _ = engine.asm(strip_assembly_comments(source), address)
+    if encoding is None:
+        raise ValueError(f"Keystone produced no encoding at 0x{address:x}")
+    return bytes(encoding)
+
+
+def place_bytes(buffer: bytearray, occupied: bytearray, offset: int, content: bytes, label: str) -> None:
+    """Place non-overlapping content into the generated code/data image.
+
+    Args:
+        buffer: Mutable `.hidpi` code/data image.
+        occupied: One-byte-per-position overlap bitmap corresponding to `buffer`.
+        offset: Destination offset in `buffer`.
+        content: Bytes to place.
+        label: Human-readable component name for diagnostics.
+    """
+    assert len(buffer) == len(occupied)
+    end_offset = offset + len(content)
+    if not 0 <= offset <= end_offset <= len(buffer):
+        raise ValueError(f"{label}: range 0x{offset:x}..0x{end_offset:x} is outside the code image")
+    if any(occupied[offset:end_offset]):
+        raise ValueError(f"{label}: overlaps another generated code/data component")
+    buffer[offset:end_offset] = content
+    occupied[offset:end_offset] = b"\x01" * len(content)
+
+
+def assemble_hidpi_code() -> bytes:
+    """Assemble all live HiDPI trampolines and place their referenced strings.
+
+    Returns:
+        Complete `.hidpi` executable-code prefix. Unused gaps are filled with `INT3` bytes.
+    """
+    code = bytearray(b"\xCC" * HIDPI_CODE_SIZE)
+    occupied = bytearray(HIDPI_CODE_SIZE)
+    for block in HIDPI_ASSEMBLY_BLOCKS:
+        block_va = HIDPI_CODE_BASE_VA + block.offset
+        machine_code = assemble_x86_64(block.source, block_va)
+        expected_size = block.end_offset - block.offset
+        if len(machine_code) != expected_size:
+            raise ValueError(
+                f"{block.name}: assembled 0x{len(machine_code):x} bytes, expected 0x{expected_size:x}; "
+                "instruction sizes changed"
+            )
+        place_bytes(code, occupied, block.offset, machine_code, block.name)
+    data_items = (
+        (USER32_DLL_OFFSET, "user32.dll".encode("utf-16le") + b"\0\0", "user32.dll"),
+        (GET_DPI_FOR_WINDOW_NAME_OFFSET, b"GetDpiForWindow\0", "GetDpiForWindow"),
+        (SYSTEM_PARAMETERS_INFO_FOR_DPI_NAME_OFFSET, b"SystemParametersInfoForDpi\0", "SystemParametersInfoForDpi"),
+    )
+    for offset, content, label in data_items:
+        place_bytes(code, occupied, offset, content, label)
+    return bytes(code)
+
+
 def align_up(value: int, alignment: int) -> int:
     """Round an integer upward to an alignment boundary.
 
@@ -122,7 +557,7 @@ def align_up(value: int, alignment: int) -> int:
         alignment: Positive power-of-two PE alignment.
 
     Returns:
-        The smallest aligned integer greater than or equal to value.
+        The smallest aligned integer greater than or equal to `value`.
     """
     assert alignment > 0 and alignment & (alignment - 1) == 0
     return (value + alignment - 1) & ~(alignment - 1)
@@ -166,7 +601,7 @@ def parse_pe(data: bytes | bytearray) -> PeLayout:
     file_alignment    = struct.unpack_from("<I", data, optional_offset + 36)[0]
     size_of_headers   = struct.unpack_from("<I", data, optional_offset + 60)[0]
     exception_directory_offset = optional_offset + 112 + 3 * 8
-    security_directory_offset = optional_offset + 112 + 4 * 8
+    security_directory_offset  = optional_offset + 112 + 4 * 8
     section_table_offset = optional_offset + optional_size
     sections: list[Section] = []
     for index in range(section_count):
@@ -245,7 +680,7 @@ def verify_slice(data: bytes | bytearray, offset: int, expected: bytes, label: s
 
 
 def make_rel32_jump(source_va: int, target_va: int, replaced_size: int) -> bytes:
-    """Build an x86-64 near JMP plus NOP padding.
+    """Assemble an x86-64 near jump and pad the overwritten region with NOPs.
 
     Args:
         source_va: Virtual address of the first byte being replaced.
@@ -253,14 +688,20 @@ def make_rel32_jump(source_va: int, target_va: int, replaced_size: int) -> bytes
         replaced_size: Number of original bytes overwritten; must be at least five.
 
     Returns:
-        A replacement byte sequence exactly replaced_size bytes long.
+        A replacement byte sequence exactly `replaced_size` bytes long.
     """
     if replaced_size < 5:
         raise ValueError("A rel32 JMP needs at least five bytes")
-    displacement = target_va - (source_va + 5)
-    if not -(1 << 31) <= displacement < (1 << 31):
-        raise ValueError("Trampoline is outside rel32 range")
-    return b"\xE9" + struct.pack("<i", displacement) + b"\x90" * (replaced_size - 5)
+    jump = assemble_x86_64(f"jmp 0x{target_va:x}", source_va)
+    if len(jump) != 5:
+        raise ValueError(f"Expected a five-byte near JMP, Keystone emitted {len(jump)} bytes")
+    padding_size = replaced_size - len(jump)
+    if padding_size == 0:
+        return jump
+    padding = assemble_x86_64("\n".join("nop" for _ in range(padding_size)), source_va + len(jump))
+    if len(padding) != padding_size:
+        raise ValueError(f"Expected {padding_size} one-byte NOPs, Keystone emitted {len(padding)} bytes")
+    return jump + padding
 
 
 def append_aligned(buffer: bytearray, content: bytes, alignment: int, pad_byte: int = 0) -> int:
@@ -273,7 +714,7 @@ def append_aligned(buffer: bytearray, content: bytes, alignment: int, pad_byte: 
         pad_byte: Byte value used for alignment padding.
 
     Returns:
-        Offset within buffer at which content begins.
+        Offset within `buffer` at which `content` begins.
     """
     assert 0 <= pad_byte <= 0xFF
     offset = align_up(len(buffer), alignment)
@@ -288,7 +729,13 @@ def make_get_dpi_unwind_info() -> bytes:
     Returns:
         UNWIND_INFO describing `push rbx; sub rsp, 0x20`.
     """
-    return bytes.fromhex("0105020005320130")
+    version_and_flags = 0x01
+    prolog_size       = 0x05
+    unwind_code_count = 0x02
+    frame_register    = 0x00
+    alloc_small       = bytes((0x05, 0x32))
+    push_rbx          = bytes((0x01, 0x30))
+    return bytes((version_and_flags, prolog_size, unwind_code_count, frame_register)) + alloc_small + push_rbx
 
 
 def make_chained_unwind_info(stack_size: int, parent: tuple[int, int, int]) -> bytes:
@@ -343,8 +790,8 @@ def build_hidpi_payload(
     for parent in (UNWIND_PARENT_GRAPH_HEIGHT, UNWIND_PARENT_MAIN_LAYOUT, UNWIND_PARENT_GRAPH_RENDERER):
         if parent not in original_runtime_functions:
             raise ValueError(f"Expected parent RUNTIME_FUNCTION {parent!r} is absent")
-
-    payload = bytearray(HIDPI_CODE)
+    hidpi_code = assemble_hidpi_code()
+    payload = bytearray(hidpi_code)
     manifest_offset = append_aligned(payload, manifest, 16, 0xCC)
     unwind_offsets: dict[tuple[int, tuple[int, int, int]], int] = {}
     get_dpi_unwind_offset = append_aligned(payload, make_get_dpi_unwind_info(), 4)
@@ -352,7 +799,7 @@ def build_hidpi_payload(
         (new_section_rva + 0x0000, new_section_rva + 0x0043, new_section_rva + get_dpi_unwind_offset)
     ]
     for label, begin_offset, end_offset, stack_size, parent in HIDPI_CHAINED_RANGES:
-        if not (0 <= begin_offset < end_offset <= len(HIDPI_CODE)):
+        if not 0 <= begin_offset < end_offset <= len(hidpi_code):
             raise ValueError(f"{label}: unwind range is outside the injected code")
         key = (stack_size, parent)
         unwind_offset = unwind_offsets.get(key)
@@ -372,7 +819,6 @@ def build_hidpi_payload(
     original_last_begin = struct.unpack_from("<I", original_exception_table, exception_size - 12)[0]
     if original_last_begin >= new_runtime_functions[0][0]:
         raise ValueError("Cannot append injected RUNTIME_FUNCTION entries while preserving sort order")
-
     new_exception_entries = b"".join(struct.pack("<III", *entry) for entry in new_runtime_functions)
     exception_table = original_exception_table + new_exception_entries
     exception_table_offset = append_aligned(payload, exception_table, 4)
@@ -398,7 +844,7 @@ def add_hidpi_section(data: bytearray, layout: PeLayout, payload: bytes) -> tupl
     Args:
         data: Mutable executable bytes.
         layout: Parsed PE layout for the original executable.
-        payload: Trampoline code followed by the relocated manifest.
+        payload: Trampoline code followed by manifest and unwind data.
 
     Returns:
         `(new_section_rva, new_section_raw_offset)` for subsequent patching.
@@ -459,7 +905,7 @@ def patch_manifest_resource(data: bytearray, manifest_rva: int, manifest: bytes)
 
 
 def apply_code_patches(data: bytearray, layout: PeLayout, new_section_rva: int) -> None:
-    """Install trampoline jumps and the one compact register-to-register replacement.
+    """Install trampoline jumps and the compact load-display register replacement.
 
     Args:
         data: Mutable executable bytes.
@@ -469,14 +915,15 @@ def apply_code_patches(data: bytearray, layout: PeLayout, new_section_rva: int) 
     for name, (site_rva, expected) in PATCH_SITES.items():
         site_offset = rva_to_file_offset(layout, site_rva)
         verify_slice(data, site_offset, expected, name)
+        site_va = layout.image_base + site_rva
         if name == "load2_width":
-            replacement = bytes.fromhex("4589d1909090")
+            replacement = assemble_x86_64("mov r9d, r10d\nnop\nnop\nnop", site_va)
         else:
             symbol_offset = HIDPI_SYMBOL_OFFSETS[name]
-            source_va = layout.image_base + site_rva
             target_va = layout.image_base + new_section_rva + symbol_offset
-            replacement = make_rel32_jump(source_va, target_va, len(expected))
-        assert len(replacement) == len(expected)
+            replacement = make_rel32_jump(site_va, target_va, len(expected))
+        if len(replacement) != len(expected):
+            raise AssertionError(f"{name}: replacement length changed")
         data[site_offset:site_offset + len(expected)] = replacement
 
 
@@ -510,12 +957,7 @@ def patch_process_lasso(input_path: Path, output_path: Path) -> tuple[str, str]:
     )
     new_section_rva, _ = add_hidpi_section(data, layout, payload)
     patch_manifest_resource(data, new_section_rva + manifest_offset_in_section, manifest)
-    patch_exception_directory(
-        data,
-        layout,
-        new_section_rva + exception_table_offset,
-        exception_table_size,
-    )
+    patch_exception_directory(data, layout, new_section_rva + exception_table_offset, exception_table_size)
     apply_code_patches(data, layout, new_section_rva)
     output_path.write_bytes(data)
     return original_hash, sha256_hex(data)
