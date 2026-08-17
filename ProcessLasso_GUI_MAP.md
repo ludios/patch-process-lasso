@@ -97,7 +97,9 @@ Offsets are relative to this main/app object.
 | `+0x870` | Main/root HWND | Confirmed: parent of major controls; passed to `GetClientRect` |
 | `+0x880` | Top usage-graph HWND | Confirmed: created as `Static`, subclassed with `0x1400e9be0` |
 | `+0x888` | Main process-list `SysListView32` HWND | Confirmed |
-| `+0x8d0` | Main `SysTabControl32` HWND | Confirmed |
+| `+0x8a8` | Lower command-bar `SysTabControl32` HWND | Confirmed: created `0x04e047`, subclassed `0x0e9c60` |
+| `+0x8b8` | Bottom `msctls_statusbar32` HWND (10 parts) | Confirmed: created `0x04e46d`; `SB_SETPARTS` at `0x04e48f` |
+| `+0x8d0` | Upper command-bar / main `SysTabControl32` HWND | Confirmed |
 | `+0x920` | Child `Static` under top graph | Confirmed |
 | `+0x940` | GUI/control HWND used by graph-subclass command routing | Strong inference |
 | `+0x9b0` | HWND receiving forwarded messages in graph-related subclass code | Strong inference |
@@ -387,6 +389,45 @@ The wrapper `Bitsum_LoadDisplay` WndProc at `0x14015fdf0` handles state setup, c
 
 ---
 
+# Tab-strip command bars (upper / lower)
+
+The two horizontal "button bars" are **not** status bars: they are two `SysTabControl32`
+composites, each a native tab strip (a couple of left-hand tab items) with named `Button`
+children overlaid on the right. They are the widgets that render too short at HiDPI because their
+height is a hardcoded logical-pixel constant in the main layout, never DPI-scaled.
+
+| Bar | Outer `SysTabControl32` | Creation | HWND field | Overlaid `Button` children (ID / HWND field) |
+|---|---|---:|---:|---|
+| Upper (above process list) | tabs `All processes` / `Active processes` | `0x04dda1` | `+0x8d0` | Show/Hide graph `0x9de2`/`+0x900`, Edit Rules `0x890d`/`+0x8f8`, Pause `0x8077`/`+0x9a0` (Edit `+0x970`) |
+| Lower (below the list region) | tab `Actions log` | `0x04e047` | `+0x8a8` | View Log `0x870b`/`+0x958`, Insights `0x8718`/`+0x968`, Buy Now `0x0fa4`/`+0x8c8` (conditional) (Edit `+0x940`, Static `+0x9b0`) |
+
+`+0x8b8` is the genuine bottom `msctls_statusbar32` (10 parts, `SBARS_SIZEGRIP`) and is unrelated
+to these bars. The `SB_SETMINHEIGHT`-looking send at `0x0fe2a3` is actually `PBM_GETPOS` in a
+progress-bar subclass — a message-number collision (`0x408`), not a status-bar height set.
+
+## Height sites in main layout (all logical px, un-scaled in the original)
+
+| RVA | Original | Meaning |
+|---:|---|---|
+| `0x050da8` | `lea eax,[r9+0x20]` → `mov [rdi+0xa6c],eax` | upper strip bottom = y + **32**; `+0xa6c` feeds the process-list top |
+| `0x050dce` | `mov [rsp+0x28],0x20` | upper strip `cy` = **32** (SetWindowPos, HWND `+0x8d0`) |
+| `0x050e50` | `mov [rdi+0xbac],0x16` | upper child cell bottom = **22** (Edit `+0x970`) |
+| `0x050e8e` | `mov [rdi+0xacc],0x16` | upper child cell bottom = **22** (`+0x900`; propagated to Edit Rules/Pause via `+0xab4..+0xabc` / `+0xc04..+0xc0c`) |
+| `0x0518bc` | `lea eax,[r9+0x20]` → `mov [rdi+0xa14],r9d` (cached y) | lower strip bottom = y + **32**; `+0xa1c` (next store) feeds downstream |
+| `0x0518e3` | `mov [rsp+0x28],0x20` | lower strip `cy` = **32** (SetWindowPos, HWND `+0x8a8`) |
+| `0x05192d` / `0x051bb5` / `0x051dc5` / `0x051ff4` | `mov [rdi+0x{b4c,b7c,b9c,a5c}],0x16` | lower child cell bottoms = **22** (Edit/View Log/Insights/Buy Now) |
+
+Each child `SetWindowPos.cy` is computed as `rectangle_bottom - rectangle_top`, so scaling the
+`0x16` bottom stores scales every child cell. The tabs are **not** `TCS_OWNERDRAWFIXED` and no
+`TCM_SETITEMSIZE`/`TCM_SETPADDING` is sent; the native tab item sizes to its font, but the outer
+window is still clamped by the explicit `cy=32`. (`0x0e9a67` sends `TCM_HITTEST` `0x130d`, not
+`TCM_SETPADDING` — that message is `0x132b`.)
+
+The HiDPI patch scales `32` and `22` by `MulDiv(·, dpi, 96)`: two trampolines (`upper_bar_height`
+at `0x050da8`, `lower_bar_height` at `0x0518bc`) call a shared `bar_metrics` helper, keep the scaled
+32 live in `r10d` for the patched `cy` stores, and pre-write the scaled 22 into the child-bottom
+fields so the original `0x16` stores can be NOP'd. See the patch-site map below.
+
 # CPU-core utilization graph
 
 Class string:
@@ -568,13 +609,25 @@ These are the build-lock sites in `patch_process_lasso_hidpi.py`. They are usefu
 | `load1_x` | `0x050b4e` | use scaled width in right-aligned X calculation |
 | `load2_gap` | `0x050c1e` | scale 5px inter-display gap |
 | `load2_x` | `0x050c35` | use scaled width for second display X |
-| `load2_width` | `0x050c4d` | reuses scaled width register |
+| `upper_bar_height` | `0x050da8` | scale upper tab-strip 32px height + its 22px child cells |
+| `lower_bar_height` | `0x0518bc` | scale lower tab-strip 32px height + its 22px child cells |
 | `processor_gap` | `0x050cf3` | scale 5px CPU/core-neighbor gap |
 | `system_parameters_info` | `0x05bf46` | use `SystemParametersInfoForDpi` for graph font metrics |
 | `card_rect` | `0x05d59c` | scale dashboard/card rectangle offsets |
 | `card_text` | `0x05d61c` | scale dashboard/card text offsets |
 
-The patched `.hidpi` section is at RVA `0x280000`. Symbol offsets in the current v2 patcher:
+`PATCH_SITES` are `jmp`-into-`.hidpi` trampolines. A second group, `INPLACE_PATCH_SITES`, rewrites
+sites in place with equal-length assembly instead of jumping:
+
+| Name | RVA | What it does |
+|---|---:|---|
+| `load2_width` | `0x050c4d` | reuse the scaled width already in `r10d` |
+| `upper_bar_cy` | `0x050dce` | `mov [rsp+0x28],r10d` (scaled 32) for SetWindowPos |
+| `lower_bar_cy` | `0x0518e3` | same for the lower strip |
+| `upper_child_bac` / `upper_child_acc` | `0x050e50` / `0x050e8e` | NOP the 22px stores (trampoline pre-writes scaled) |
+| `lower_child_{b4c,b7c,b9c,a5c}` | `0x05192d` / `0x051bb5` / `0x051dc5` / `0x051ff4` | NOP the 22px stores |
+
+The patched `.hidpi` section is at RVA `0x280000` (`HIDPI_CODE_SIZE` is now `0x900`). Symbol offsets:
 
 ```text
 +0x0000  get_dpi helper
@@ -592,7 +645,13 @@ The patched `.hidpi` section is at RVA `0x280000`. Symbol offsets in the current
 +0x0580  fixed_load_reservation_2
 +0x0620  load2_gap
 +0x0680  processor_gap
++0x0700  bar_metrics helper (returns scaled 32 in eax, scaled 22 in edx)
++0x0760  upper_bar_height
++0x07b0  lower_bar_height
 ```
+
+`bar_metrics` has its own standalone `RUNTIME_FUNCTION` (like `get_dpi`); both bar trampolines chain
+their body/suffix ranges into `UNWIND_PARENT_MAIN_LAYOUT`.
 
 The injected x86-64 is authored as Intel-syntax assembly and assembled by the GNU binutils toolchain (`as`, `ld`, `objcopy`). Original hook-site bytes are retained as immutable build fingerprints.
 
@@ -796,6 +855,7 @@ These are deliberately called out so a future session does not mistake inference
 - The CPU-core graph's actual hot drawing primitive path has not been fully decomposed; custom-message handlers are the better next entry point than hunting only for `WM_PAINT`.
 - The top graph's repeated 10-pixel sample/grid spacing has not been DPI-scaled. It currently looks acceptable but is a known logical-pixel remnant.
 - The renderer's `0x68`-byte history record layout has not been field-mapped.
+- The main-UI HFONT (stored at main object `+0x4c8`, used by the tab-strip command bars and their child buttons via `WM_SETFONT` at `0x05008d`/`0x0500ac`) is built from `SystemParametersInfoW` at `0x04c855` — the non-DPI call, unlike the graph font path already redirected to `SystemParametersInfoForDpi`. Scaling the bar geometry fixes the clipping, but if bar text looks mis-sized across monitors, this font path (and its recreation lifecycle) is the next target, not another height constant.
 
 ---
 

@@ -62,6 +62,30 @@ class AssemblyRegressionTests(unittest.TestCase):
                 actual  = patcher.assemble_x86_64(block.source, address)
                 self.assertEqual(hashlib.sha256(actual).hexdigest(), expected_hash)
 
+    @unittest.skipUnless(BINUTILS_AVAILABLE, "GNU binutils (as/ld/objcopy) not found on PATH")
+    def test_bar_height_blocks_match_independent_reference(self) -> None:
+        """Pin the two tab-bar-height trampolines and their shared MulDiv helper."""
+        expected_sha256 = {
+            "bar_metrics": "6e6dd982e45d23b3fbf59719687dc22e4b278d0d206933b42778b5445e37c819",
+            "upper_bar_height": "1b6b3bbbd4f72bd4ff61d46c5d103f7e4109683760b4f13af89d8a2f9cac6fc2",
+            "lower_bar_height": "225cec39741cb5501e3c0de3fbf31321b6750a295045335acff57fde48724d6c",
+        }
+        blocks = {block.name: block for block in patcher.HIDPI_ASSEMBLY_BLOCKS}
+        for name, expected_hash in expected_sha256.items():
+            with self.subTest(block=name):
+                block   = blocks[name]
+                address = patcher.HIDPI_CODE_BASE_VA + block.offset
+                actual  = patcher.assemble_x86_64(block.source, address)
+                self.assertEqual(hashlib.sha256(actual).hexdigest(), expected_hash)
+
+    @unittest.skipUnless(BINUTILS_AVAILABLE, "GNU binutils (as/ld/objcopy) not found on PATH")
+    def test_inplace_replacements_preserve_slice_length(self) -> None:
+        """Require each in-place replacement to reassemble to its original slice length."""
+        for name, (rva, expected, replacement_source) in patcher.INPLACE_PATCH_SITES.items():
+            with self.subTest(site=name):
+                replacement = patcher.assemble_x86_64(replacement_source, patcher.EXPECTED_IMAGE_BASE + rva)
+                self.assertEqual(len(replacement), len(expected))
+
     def test_fixed_load_reservations_replace_the_complete_96_dpi_branches(self) -> None:
         """Require each hook to cover the old 65 px reservation and its 160 px visibility test."""
         first_rva, first_bytes   = patcher.PATCH_SITES["fixed_load_reservation_1"]
@@ -127,6 +151,16 @@ class AssemblyRegressionTests(unittest.TestCase):
         layout   = patcher.parse_pe(original)
         self.assertEqual(hashlib.sha256(original).hexdigest(), patcher.EXPECTED_SHA256)
         for name, (rva, expected) in patcher.PATCH_SITES.items():
+            with self.subTest(site=name):
+                offset = patcher.rva_to_file_offset(layout, rva)
+                self.assertEqual(original[offset:offset + len(expected)], expected)
+
+    @unittest.skipUnless(ORIGINAL_EXE.is_file(), "set PROCESS_LASSO_EXE or copy ProcessLasso.exe beside the patcher")
+    def test_original_inplace_sites_still_match_build_lock(self) -> None:
+        """Require every in-place replacement site to match the exact original executable."""
+        original = ORIGINAL_EXE.read_bytes()
+        layout   = patcher.parse_pe(original)
+        for name, (rva, expected, _replacement_source) in patcher.INPLACE_PATCH_SITES.items():
             with self.subTest(site=name):
                 offset = patcher.rva_to_file_offset(layout, rva)
                 self.assertEqual(original[offset:offset + len(expected)], expected)

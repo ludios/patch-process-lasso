@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Model-output: Claude Fable 5
+# Model-output: GPT-5.6-Sol
 """Patch the exact Process Lasso build supplied on 2026-08-17 for Per-Monitor V2 HiDPI."""
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ EXPECTED_NEW_SECTION_RVA = 0x280000
 EXPECTED_CERTIFICATE_OFFSET = 0x274600
 MANIFEST_DATA_ENTRY_OFFSET = 0x235970
 LEGACY_HIDPI_CODE_SIZE = 0x4CD
-HIDPI_CODE_SIZE = 0x700
+HIDPI_CODE_SIZE = 0x900
 HIDPI_CODE_BASE_VA = EXPECTED_IMAGE_BASE + EXPECTED_NEW_SECTION_RVA
 
 USER32_DLL_OFFSET = 0x03F0
@@ -41,6 +42,8 @@ HIDPI_SYMBOL_OFFSETS = {
     "fixed_load_reservation_2": 0x0580,
     "load2_gap": 0x0620,
     "processor_gap": 0x0680,
+    "upper_bar_height": 0x0760,
+    "lower_bar_height": 0x07B0,
 }
 
 PATCH_SITES = {
@@ -51,7 +54,8 @@ PATCH_SITES = {
     "load1_width":            (0x050B2E, bytes.fromhex("41b93c000000")),
     "load1_x":                (0x050B4E, bytes.fromhex("488d8f900700008d50c4")),
     "load2_x":                (0x050C35, bytes.fromhex("8d50c4488b8710080000")),
-    "load2_width":            (0x050C4D, bytes.fromhex("41b93c000000")),
+    "upper_bar_height":       (0x050DA8, bytes.fromhex("418d412089876c0a0000")),
+    "lower_bar_height":       (0x0518BC, bytes.fromhex("418d412044898f140a0000")),
     "system_parameters_info": (0x05BF46, bytes.fromhex("ff157c3d1700")),
     "card_rect":              (0x05D59C, bytes.fromhex("8b4c246083c1058b54246483c205448b45c04183c0164403c1458d680f448b4d90440faf4dc44183c1164403ca")),
     "card_text":              (0x05D61C, bytes.fromhex("8b5c246483c30d8b74246083c611")),
@@ -59,6 +63,30 @@ PATCH_SITES = {
     "fixed_load_reservation_2": (0x050AB2, bytes.fromhex("8d429c83f83c7e0b8d4abf898fc8090000eb0341b401")),
     "load2_gap":              (0x050C1E, bytes.fromhex("8b87d00a000083e805")),
     "processor_gap":          (0x050CF3, bytes.fromhex("412bc083c20589442420")),
+}
+
+# In-place instruction replacements that do not trampoline into `.hidpi`. Each maps a
+# build-locked original slice to assembly that must reassemble to exactly the same length,
+# leaving the surrounding code untouched. Unlike `PATCH_SITES`, these do not jump away: they
+# either reuse a register that a nearby trampoline leaves live, or NOP a now-dead hardcoded
+# store whose field a trampoline has already rewritten with a DPI-scaled value.
+_NOP3 = "\n".join("nop" for _ in range(3))
+_NOP10 = "\n".join("nop" for _ in range(10))
+INPLACE_PATCH_SITES = {
+    # Fixed load-display #2 width: reuse the DPI-scaled width already in r10d (from load1_width).
+    "load2_width": (0x050C4D, bytes.fromhex("41b93c000000"), "mov r9d, r10d\n" + _NOP3),
+    # Outer tab-strip `cy` argument to SetWindowPos: use the scaled 32 its trampoline left in r10d.
+    "upper_bar_cy": (0x050DCE, bytes.fromhex("c744242820000000"), "mov dword ptr [rsp + 0x28], r10d\n" + _NOP3),
+    "lower_bar_cy": (0x0518E3, bytes.fromhex("c744242820000000"), "mov dword ptr [rsp + 0x28], r10d\n" + _NOP3),
+    # Overlaid child-cell heights (originally 22 px). The bar-height trampolines pre-write
+    # DPI-scaled values into these fields, so the original constant stores must be neutralized
+    # or they would clobber the scaled values back to 22.
+    "upper_child_bac": (0x050E50, bytes.fromhex("c787ac0b000016000000"), _NOP10),
+    "upper_child_acc": (0x050E8E, bytes.fromhex("c787cc0a000016000000"), _NOP10),
+    "lower_child_b4c": (0x05192D, bytes.fromhex("c7874c0b000016000000"), _NOP10),
+    "lower_child_b7c": (0x051BB5, bytes.fromhex("c7877c0b000016000000"), _NOP10),
+    "lower_child_b9c": (0x051DC5, bytes.fromhex("c7879c0b000016000000"), _NOP10),
+    "lower_child_a5c": (0x051FF4, bytes.fromhex("c7875c0a000016000000"), _NOP10),
 }
 
 UNWIND_PARENT_GRAPH_HEIGHT = (0x050870, 0x0509F0, 0x20295C)
@@ -94,6 +122,10 @@ HIDPI_CHAINED_RANGES = (
     ("load2_gap_suffix",               0x065C, 0x066A, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
     ("processor_gap_body",             0x0680, 0x06DC, 0x40, UNWIND_PARENT_MAIN_LAYOUT),
     ("processor_gap_suffix",           0x06DC, 0x06EC, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
+    ("upper_bar_height_body",          0x0760, 0x078C, 0x30, UNWIND_PARENT_MAIN_LAYOUT),
+    ("upper_bar_height_suffix",        0x078C, 0x07AD, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
+    ("lower_bar_height_body",          0x07B0, 0x07E6, 0x30, UNWIND_PARENT_MAIN_LAYOUT),
+    ("lower_bar_height_suffix",        0x07E6, 0x0816, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
 )
 
 
@@ -547,6 +579,83 @@ mov dword ptr [rsp + 0x20], r11d
 jmp 0x140050cfd                           # original continuation
 """,
     ),
+    AssemblyBlock(
+        "bar_metrics",
+        0x0700,
+        0x0750,
+        r"""
+sub rsp, 0x38
+call 0x140280000                           # get_dpi(hwnd in rcx) -> eax = dpi
+mov dword ptr [rsp + 0x20], eax            # save dpi
+mov ecx, 0x20
+mov edx, eax                               # dpi
+mov r8d, 0x60
+mov rax, 0x1401cf688                       # &MulDiv (USER32 IAT slot)
+call qword ptr [rax]                       # MulDiv(32, dpi, 96)
+mov dword ptr [rsp + 0x24], eax            # save scaled 32
+mov ecx, 0x16
+mov edx, dword ptr [rsp + 0x20]            # dpi
+mov r8d, 0x60
+mov rax, 0x1401cf688
+call qword ptr [rax]                       # MulDiv(22, dpi, 96) -> eax
+mov edx, eax                               # out: scaled 22
+mov eax, dword ptr [rsp + 0x24]            # out: scaled 32
+add rsp, 0x38
+ret
+""",
+    ),
+    AssemblyBlock(
+        "upper_bar_height",
+        0x0760,
+        0x07AD,
+        r"""
+sub rsp, 0x30
+mov dword ptr [rsp + 0x20], edx            # live strip width
+mov dword ptr [rsp + 0x24], r9d            # live strip y
+mov rcx, qword ptr [rdi + 0x8d0]           # upper tab-strip HWND
+call 0x140280700                           # bar_metrics -> eax=scaled32, edx=scaled22
+mov r10d, eax                              # scaled 32, live to the cy replacement at 0x050dce
+mov r11d, edx                              # scaled 22
+mov edx, dword ptr [rsp + 0x20]            # restore width
+mov r9d, dword ptr [rsp + 0x24]            # restore y
+add rsp, 0x30
+mov dword ptr [rdi + 0xbac], r11d          # Edit +0x970 cell bottom
+mov dword ptr [rdi + 0xacc], r11d          # Button +0x900 cell bottom (propagated to Edit Rules/Pause)
+mov eax, r9d
+add eax, r10d
+mov dword ptr [rdi + 0xa6c], eax           # cached strip bottom = y + scaled 32 (process-list top reads this)
+test edx, edx                              # recreate the sign flag consumed by the original js
+jmp 0x140050db2                            # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "lower_bar_height",
+        0x07B0,
+        0x0816,
+        r"""
+sub rsp, 0x30
+mov dword ptr [rsp + 0x20], ecx            # live strip width
+mov dword ptr [rsp + 0x24], r8d            # live strip x
+mov dword ptr [rsp + 0x28], r9d            # live strip y
+mov rcx, qword ptr [rdi + 0x8a8]           # lower tab-strip HWND
+call 0x140280700                           # bar_metrics -> eax=scaled32, edx=scaled22
+mov r10d, eax                              # scaled 32, live to the cy replacement at 0x0518e3
+mov r11d, edx                              # scaled 22
+mov ecx, dword ptr [rsp + 0x20]            # restore width
+mov r8d, dword ptr [rsp + 0x24]            # restore x
+mov r9d, dword ptr [rsp + 0x28]            # restore y
+add rsp, 0x30
+mov dword ptr [rdi + 0xb4c], r11d          # Edit +0x940 cell bottom
+mov dword ptr [rdi + 0xb7c], r11d          # View Log +0x958 cell bottom
+mov dword ptr [rdi + 0xb9c], r11d          # Insights +0x968 cell bottom
+mov dword ptr [rdi + 0xa5c], r11d          # Buy Now +0x8c8 cell bottom
+mov eax, r9d
+add eax, r10d
+mov dword ptr [rdi + 0xa14], r9d           # replay overwritten cached-y store
+test ecx, ecx                              # recreate the sign flag consumed by the original js
+jmp 0x1400518c7                            # original cached-bottom store: mov [rdi+0xa1c],eax
+""",
+    ),
 )
 
 
@@ -912,6 +1021,24 @@ def make_get_dpi_unwind_info() -> bytes:
     return bytes((version_and_flags, prolog_size, unwind_code_count, frame_register)) + alloc_small + push_rbx
 
 
+def make_bar_metrics_unwind_info() -> bytes:
+    """Build x64 unwind metadata for the injected `bar_metrics` helper.
+
+    The helper saves no nonvolatile registers; its only prologue op is `sub rsp, 0x38`
+    (a four-byte instruction), so one `UWOP_ALLOC_SMALL` fully describes its frame.
+
+    Returns:
+        A 4-byte-aligned UNWIND_INFO record for the helper.
+    """
+    version_and_flags = 0x01
+    prolog_size       = 0x04
+    unwind_code_count = 0x01
+    frame_register    = 0x00
+    alloc_small       = bytes((0x04, 0x62))   # at prolog offset 4: (6 * 8) + 8 = 0x38
+    padding           = bytes((0x00, 0x00))   # pad the 6-byte record to a 4-byte boundary
+    return bytes((version_and_flags, prolog_size, unwind_code_count, frame_register)) + alloc_small + padding
+
+
 def make_chained_unwind_info(stack_size: int, parent: tuple[int, int, int]) -> bytes:
     """Build chained x64 unwind metadata for an injected trampoline range.
 
@@ -972,6 +1099,13 @@ def build_hidpi_payload(
     new_runtime_functions: list[tuple[int, int, int]] = [
         (new_section_rva + 0x0000, new_section_rva + 0x0043, new_section_rva + get_dpi_unwind_offset)
     ]
+    bar_metrics_block = next(block for block in HIDPI_ASSEMBLY_BLOCKS if block.name == "bar_metrics")
+    bar_metrics_unwind_offset = append_aligned(payload, make_bar_metrics_unwind_info(), 4)
+    new_runtime_functions.append((
+        new_section_rva + bar_metrics_block.offset,
+        new_section_rva + bar_metrics_block.end_offset,
+        new_section_rva + bar_metrics_unwind_offset,
+    ))
     for label, begin_offset, end_offset, stack_size, parent in HIDPI_CHAINED_RANGES:
         if not 0 <= begin_offset < end_offset <= len(hidpi_code):
             raise ValueError(f"{label}: unwind range is outside the injected code")
@@ -1079,7 +1213,11 @@ def patch_manifest_resource(data: bytearray, manifest_rva: int, manifest: bytes)
 
 
 def apply_code_patches(data: bytearray, layout: PeLayout, new_section_rva: int) -> None:
-    """Install trampoline jumps and the compact load-display register replacement.
+    """Install trampoline jumps and in-place instruction replacements at the patch sites.
+
+    `PATCH_SITES` entries redirect a hook site to its `.hidpi` trampoline with a rel32 jump.
+    `INPLACE_PATCH_SITES` entries rewrite a site in place with equal-length assembly, either
+    reusing a register a trampoline leaves live or neutralizing a now-dead hardcoded store.
 
     Args:
         data: Mutable executable bytes.
@@ -1090,14 +1228,21 @@ def apply_code_patches(data: bytearray, layout: PeLayout, new_section_rva: int) 
         site_offset = rva_to_file_offset(layout, site_rva)
         verify_slice(data, site_offset, expected, name)
         site_va = layout.image_base + site_rva
-        if name == "load2_width":
-            replacement = assemble_x86_64("mov r9d, r10d\nnop\nnop\nnop", site_va)
-        else:
-            symbol_offset = HIDPI_SYMBOL_OFFSETS[name]
-            target_va = layout.image_base + new_section_rva + symbol_offset
-            replacement = make_rel32_jump(site_va, target_va, len(expected))
+        symbol_offset = HIDPI_SYMBOL_OFFSETS[name]
+        target_va = layout.image_base + new_section_rva + symbol_offset
+        replacement = make_rel32_jump(site_va, target_va, len(expected))
         if len(replacement) != len(expected):
             raise AssertionError(f"{name}: replacement length changed")
+        data[site_offset:site_offset + len(expected)] = replacement
+    for name, (site_rva, expected, replacement_source) in INPLACE_PATCH_SITES.items():
+        site_offset = rva_to_file_offset(layout, site_rva)
+        verify_slice(data, site_offset, expected, name)
+        site_va = layout.image_base + site_rva
+        replacement = assemble_x86_64(replacement_source, site_va)
+        if len(replacement) != len(expected):
+            raise AssertionError(
+                f"{name}: in-place replacement is 0x{len(replacement):x} bytes, expected 0x{len(expected):x}"
+            )
         data[site_offset:site_offset + len(expected)] = replacement
 
 
