@@ -9,6 +9,10 @@ Before starting or resuming work, check what `hostname` outputs.
 - If "clank", you're unable to hit the production databases or make real trades; run whatever commands you need.
 - If anything else, stop and ask the user to add their hostname to this file.
 
+# Reverse-engineering map
+
+`ProcessLasso_GUI_MAP.md` is a build-specific map of the Process Lasso GUI: rendering, layout, custom controls, the graphs, and GUI-settings code, plus the HiDPI patch's injection anchors and the x64 binary-patching rules learned here. Start there before re-deriving addresses; it also lists re-identification recipes for when a Process Lasso update shifts them.
+
 # Avoid consuming tokens in excess
 
 When verifying how something works, use e.g. `rg -B2 -A10` until you need the whole file.
