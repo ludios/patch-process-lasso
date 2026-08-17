@@ -1,3 +1,5 @@
+// Model-output: GPT-5.6-Sol
+
 # Process Lasso 18.2.3.42: tab-strip HiDPI follow-up report
 
 ## Scope and build lock
@@ -19,10 +21,11 @@ The recommended changes are:
    it through a new `.hidpi+0x0820` wrapper. Obtain DPI from the already-live notification HWND at
    `app+0x878`, then call `SystemParametersInfoForDpi` with that DPI. This reuses all existing
    resolver strings and helpers.
-2. Add `SS_CENTERIMAGE` to the two magnifying-glass `Static` controls at RVAs `0x04e262` and
-   `0x04e2bb`. Their existing `SS_REALSIZECONTROL` style is what independently stretches the icon
-   into a 16-by-taller-than-16 rectangle. Centering suppresses that stretch and preserves the HICON's
-   aspect ratio. This is a six-byte in-place replacement at each site; no DPI helper is needed.
+2. Make each magnifying-glass `Static` square by setting its width equal to its computed inner
+   height (`client_height - 4`) and moving its left edge to keep it right-aligned. The existing
+   `SS_REALSIZECONTROL` style then scales the square HICON into a square destination instead of the
+   current 16-by-taller-than-16 rectangle. This uses two small, call-free layout trampolines plus one
+   equal-length in-place width store; no DPI helper is needed.
 
 All injected control transfers and data references in the proposed font wrapper are rel32 or
 RIP-relative. It contains no preferred-VA immediate and needs no `.hidpi` base relocation.
@@ -383,7 +386,8 @@ There is no `SS_CENTERIMAGE` (`0x200`). Microsoft's
 [`Static Control Styles` documentation](https://learn.microsoft.com/en-us/windows/win32/controls/static-control-styles)
 specifies that `SS_REALSIZECONTROL` stretches/shrinks an icon to the control rectangle when
 `SS_CENTERIMAGE` is absent, allowing the X and Y dimensions to change independently. With
-`SS_CENTERIMAGE`, the icon is centered and not resized.
+`SS_CENTERIMAGE`, the icon is centered without resizing and can be clipped if larger than the
+control.
 
 ### Exact destination-size computation
 
@@ -441,44 +445,134 @@ sees the taller Edit and `cy=client_height-4` grows, but `cx` does not. The nati
 `SS_REALSIZECONTROL` and stretches the square HICON independently into the roughly 16-by-29
 destination. That is the direct cause of the horizontal squish.
 
-### Recommended minimal patch
+### Why changing only the Static style is insufficient
 
-Add `SS_CENTERIMAGE` (`0x200`) while retaining the existing icon/notification styles. This keeps the
-native HICON at its aspect-correct size and centers it in the taller Static window; the Static's
-existing notification/hit rectangle is unchanged.
+Adding `SS_CENTERIMAGE` would stop distortion, but it is not robust here. `SHGSI_SMALLICON` selects
+the icon using the `SM_CXSMICON`/`SM_CYSMICON` system metrics, as documented for
+[`SHGetStockIconInfo`](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shgetstockiconinfo),
+and those dimensions may exceed 16 at elevated DPI. The Static would still be only 16 pixels wide,
+so a centered native-size HICON could be clipped horizontally. Removing `SS_REALSIZECONTROL` has
+the same size mismatch. The minimal robust fix is to make the destination square while retaining
+the existing stretch behavior.
 
-| Bar | RVA | Raw offset | Original | Replacement |
-|---|---:|---:|---|---|
-| Lower | `0x04e262` | `0x04d662` | `41 b9 43 09 00 50` (`mov r9d,0x50000943`) | `41 b9 43 0b 00 50` (`mov r9d,0x50000b43`) |
-| Upper | `0x04e2bb` | `0x04d6bb` | `41 b9 43 09 00 50` (`mov r9d,0x50000943`) | `41 b9 43 0b 00 50` (`mov r9d,0x50000b43`) |
+### Recommended square-geometry patch
 
-In `patch.py` style:
+Use the already-computed `cy = client_height - 4` as both dimensions, then recompute
+`x = (right - 1) - cy`. The Edit width is unchanged; only the right-aligned icon child grows inward
+by the same amount its height grew. The HICON is drawn into a square rectangle, so the existing
+native `SS_REALSIZECONTROL` path cannot change its aspect ratio.
+
+The font block proposed above ends at `.hidpi+0x08b1`. Both call-free geometry blocks fit inside the
+existing `HIDPI_CODE_SIZE = 0x900`:
 
 ```python
-INPLACE_PATCH_SITES.update({
-    "lower_search_icon_center": (
-        0x04E262,
-        bytes.fromhex("41b943090050"),
-        "mov r9d, 0x50000b43",
+HIDPI_SYMBOL_OFFSETS.update({
+    "upper_search_icon_square": 0x08C0,
+    "lower_search_icon_square": 0x08E0,
+})
+
+PATCH_SITES.update({
+    "upper_search_icon_square": (
+        0x051200,
+        bytes.fromhex("412bc1782d"),       # sub eax,r9d; js 0x140051232
     ),
-    "upper_search_icon_center": (
-        0x04E2BB,
-        bytes.fromhex("41b943090050"),
-        "mov r9d, 0x50000b43",
+    "lower_search_icon_square": (
+        0x0519E7,
+        bytes.fromhex("412bc1412bc8"),     # sub eax,r9d; sub ecx,r8d
     ),
 })
 ```
 
-This is ASLR-safe by construction: only an immediate style bitmask changes, instruction length stays
-six bytes, and there is no address or control transfer. It also avoids guessing a width scaling rule
-or enlarging the entire search box.
+Upper block, `.hidpi+0x08c0..+0x08df` (31 bytes):
 
-If a later visual test decides the correctly shaped stock icon is too small rather than merely
-distorted, that is a separate enhancement: obtain a DPI-appropriate icon or change both Static
-dimensions to the same DPI-scaled side. At the layout points, `app+0x970` (upper Edit) and
-`app+0x940` (lower Edit) are both live HWNDs suitable for the existing `get_dpi` helper; the outer
-tab HWNDs `+0x8d0` and `+0x8a8` are live as well. The recommended aspect-ratio patch does not need
-any of them.
+```python
+AssemblyBlock(
+    "upper_search_icon_square",
+    0x08C0,
+    0x08DF,
+    r"""
+sub eax, r9d                               # side = client bottom-2 - (top+2)
+js 0x140051232                             # preserve original invalid-height exit
+mov r8d, dword ptr [rdi + 0xc18]           # right-1 cached at 0x0511d8
+sub r8d, eax                               # x = (right-1) - side
+mov dword ptr [rdi + 0xc10], r8d           # replace fixed-16 cached x
+jmp 0x140051205                            # resume with original coordinate tests
+""",
+),
+```
+
+The upper `SetWindowPos` still has a separate fixed-width stack store. Replace it in place with the
+square side left live in `eax`:
+
+```python
+"upper_search_icon_width": (
+    0x051224,
+    bytes.fromhex("c744242010000000"),
+    "mov dword ptr [rsp + 0x20], eax\n" + "\n".join("nop" for _ in range(4)),
+),
+```
+
+That reassembles to the equal-length replacement bytes
+`89 44 24 20 90 90 90 90`.
+
+Lower block, `.hidpi+0x08e0..+0x08fd` (29 bytes):
+
+```python
+AssemblyBlock(
+    "lower_search_icon_square",
+    0x08E0,
+    0x08FD,
+    r"""
+sub eax, r9d                               # side = client bottom-2 - (top+2)
+mov r8d, dword ptr [rdi + 0xc28]           # right-1 cached at 0x0519c9
+sub r8d, eax                               # x = (right-1) - side
+mov dword ptr [rdi + 0xc20], r8d           # replace fixed-16 cached x
+mov ecx, eax                               # SetWindowPos cx = cy = side
+test ecx, ecx                              # recreate SF consumed by original js
+jmp 0x1400519ed                            # original validity tests and SetWindowPos
+""",
+),
+```
+
+The complete hook-site table is:
+
+| Site | RVA | Raw offset | Original bytes | Replacement bytes |
+|---|---:|---:|---|---|
+| Upper geometry hook | `0x051200` | `0x050600` | `41 2b c1 78 2d` | `e9 bb f6 22 00` |
+| Upper width store | `0x051224` | `0x050624` | `c7 44 24 20 10 00 00 00` | `89 44 24 20 90 90 90 90` |
+| Lower geometry hook | `0x0519e7` | `0x050de7` | `41 2b c1 41 2b c8` | `e9 f4 ee 22 00 90` |
+
+Both hooks replace whole instructions. The lower trampoline returns with `eax=ecx=side`, `r8d=x`,
+and flags from `test ecx,ecx`, exactly matching the values/negative-width condition expected at the
+original `js` at `0x0519ed`. The upper trampoline explicitly performs the overwritten negative-
+height branch, then returns at `0x051205` with `eax=side` and the corrected `r8d=x`.
+
+Add call-free chained ranges under the existing `UNWIND_PARENT_MAIN_LAYOUT`:
+
+```python
+("upper_search_icon_square", 0x08C0, 0x08DF, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
+("lower_search_icon_square", 0x08E0, 0x08FD, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
+```
+
+No stack adjustment or call occurs in either block.
+
+The B-side rel32 audit is:
+
+| Instruction | Next RVA | Target RVA | Calculation | disp32 bytes |
+|---|---:|---:|---:|---|
+| Upper hook `jmp` | `0x051205` | `0x2808c0` | `0x2808c0 - 0x051205 = +0x22f6bb` | `bb f6 22 00` |
+| Upper trampoline `js` at `+0x08c3` | `0x2808c9` | `0x051232` | `0x051232 - 0x2808c9 = -0x22f697` | `69 09 dd ff` |
+| Upper return `jmp` at `+0x08da` | `0x2808df` | `0x051205` | `0x051205 - 0x2808df = -0x22f6da` | `26 09 dd ff` |
+| Lower hook `jmp` | `0x0519ec` | `0x2808e0` | `0x2808e0 - 0x0519ec = +0x22eef4` | `f4 ee 22 00` |
+| Lower return `jmp` at `+0x08f8` | `0x2808fd` | `0x0519ed` | `0x0519ed - 0x2808fd = -0x22ef10` | `f0 10 dd ff` |
+
+These are all rel32 differences between module RVAs. There are no IAT/data references and no
+absolute VA. The loader's ASLR slide cancels from every difference.
+
+At these layout points, `app+0x970` (upper Edit) and `app+0x940` (lower Edit) are live HWNDs suitable
+for the existing `get_dpi` helper; the outer tab HWNDs `+0x8d0` and `+0x8a8` are live as well. The
+recommended geometry derives its side directly from each Edit's actual client rectangle and needs
+no DPI call.
 
 ## Residual uncertainties and targeted runtime checks
 
@@ -491,7 +585,7 @@ any of them.
 3. **Button font ownership:** query `WM_GETFONT` on all six overlaid Button HWNDs and compare with
    `app+0x4c8`. If the values differ and the captions are still small, add explicit `WM_SETFONT`
    sends after button creation.
-4. **Static style result:** at 125/150/200%, inspect both `app+0x9a8` and `app+0x9b0`. The expected
-   result is a centered, undistorted search HICON inside the taller rectangle. If size—not aspect—is
-   then the remaining complaint, trace a DPI-sized stock-icon acquisition rather than restoring
-   independent rectangle stretching.
+4. **Square Static result:** at 125/150/200%, inspect both `app+0x9a8` and `app+0x9b0`. Confirm
+   `client_width == client_height`, the right edge remains anchored, the glass is undistorted, and
+   the enlarged child does not cover Edit text. If its visual size is still wrong, trace a
+   DPI-appropriate stock-icon acquisition while keeping the destination square.
