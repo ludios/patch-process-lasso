@@ -72,6 +72,9 @@ class AssemblyRegressionTests(unittest.TestCase):
             "main_system_parameters_info": "2615947debb1cf55874cdd3445ce86933e28d95a1ebaf951e72562900134a0c2",
             "upper_search_icon_square": "8ec8c7cb527c7517520ab5ffda2a6859a5ea7189bcef05bdb65c7cc7943935b4",
             "lower_search_icon_square": "df627f2f34ab569d6fe4c1a7515fa8f6b04e12c308c72e130d894d17ac7496d5",
+            "search_margin": "ae76bc3e515ccd90f8f256949158061a2f0c25ec35fecb43818510ab909ec7fe",
+            "upper_search_margin": "520b04056c0a7dd6c5a5269d1c88f2c5fd29c19628c1647112b64547471a5dff",
+            "lower_search_margin": "71402f041484ec9bc013d6c018d19613dd0245d2b1e91e4b785b4dfa91ec3d09",
         }
         blocks = {block.name: block for block in patcher.HIDPI_ASSEMBLY_BLOCKS}
         for name, expected_hash in expected_sha256.items():

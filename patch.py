@@ -47,6 +47,8 @@ HIDPI_SYMBOL_OFFSETS = {
     "main_system_parameters_info": 0x0820,
     "upper_search_icon_square": 0x08C0,
     "lower_search_icon_square": 0x08E0,
+    "upper_search_margin": 0x0930,
+    "lower_search_margin": 0x0970,
 }
 
 PATCH_SITES = {
@@ -69,6 +71,8 @@ PATCH_SITES = {
     "main_system_parameters_info": (0x04C855, bytes.fromhex("ff156d341800")),
     "upper_search_icon_square":    (0x051200, bytes.fromhex("412bc1782d")),
     "lower_search_icon_square":    (0x0519E7, bytes.fromhex("412bc1412bc8")),
+    "upper_search_margin":         (0x04E177, bytes.fromhex("41b900001000")),
+    "lower_search_margin":         (0x04E0EA, bytes.fromhex("41b900001000")),
 }
 
 # In-place instruction replacements that do not trampoline into `.hidpi`. Each maps a
@@ -102,6 +106,7 @@ UNWIND_PARENT_GRAPH_HEIGHT = (0x050870, 0x0509F0, 0x20295C)
 UNWIND_PARENT_MAIN_LAYOUT  = (0x0509F0, 0x0521BE, 0x202978)
 UNWIND_PARENT_GRAPH_RENDERER = (0x05BE30, 0x05E8EF, 0x20348C)
 UNWIND_PARENT_MAIN_INIT = (0x04C750, 0x04D62A, 0x202718)
+UNWIND_PARENT_MAIN_CREATE = (0x04DCB0, 0x050868, 0x202818)
 
 HIDPI_CHAINED_RANGES = (
     ("graph_height_prefix",    0x0050, 0x0055, 0x00, UNWIND_PARENT_GRAPH_HEIGHT),
@@ -140,6 +145,10 @@ HIDPI_CHAINED_RANGES = (
     ("main_system_parameters_tail",    0x08A8, 0x08B1, 0x00, UNWIND_PARENT_MAIN_INIT),
     ("upper_search_icon_square",       0x08C0, 0x08DF, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
     ("lower_search_icon_square",       0x08E0, 0x08FD, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
+    ("upper_search_margin_body",       0x0930, 0x094C, 0x30, UNWIND_PARENT_MAIN_CREATE),
+    ("upper_search_margin_tail",       0x094C, 0x0955, 0x00, UNWIND_PARENT_MAIN_CREATE),
+    ("lower_search_margin_body",       0x0970, 0x098C, 0x30, UNWIND_PARENT_MAIN_CREATE),
+    ("lower_search_margin_tail",       0x098C, 0x0995, 0x00, UNWIND_PARENT_MAIN_CREATE),
 )
 
 
@@ -754,6 +763,61 @@ test ecx, ecx                              # recreate the sign flag consumed by 
 jmp 0x1400519ed                            # original validity tests + SetWindowPos
 """,
     ),
+    AssemblyBlock(
+        "search_margin",
+        0x0900,
+        0x0924,
+        # Shared helper for the two search-Edit right margins. Input rcx = Edit HWND; returns in eax
+        # MulDiv(22, dpi, 96) - 6, which matches the DPI-scaled search-icon width (client_height - 4
+        # for a 1px-border Edit). RIP-relative MulDiv (ASLR-safe); displacement is specific to 0x0900.
+        r"""
+sub rsp, 0x28
+call 0x140280000                           # get_dpi(hwnd in rcx) -> eax = dpi
+mov edx, eax                               # dpi
+mov ecx, 0x16                              # 22 (original Edit cell height / margin base)
+mov r8d, 0x60
+call qword ptr [rip - 0xb1294]             # MulDiv(22, dpi, 96) via IAT 0x1401cf688
+sub eax, 6                                 # scaled icon width = scaled cell height - border(2) - 4
+add rsp, 0x28
+ret
+""",
+    ),
+    AssemblyBlock(
+        "upper_search_margin",
+        0x0930,
+        0x0955,
+        # Scale the upper search Edit's EM_SETMARGINS right margin to match the DPI-scaled icon.
+        # Replaces `mov r9d, 0x100000` (MAKELONG(0,16)); rax holds the just-created Edit HWND and must
+        # survive for the following `mov rcx,rax`. Build lParam = MAKELONG(0, scaled_margin) in r9d.
+        r"""
+sub rsp, 0x30
+mov qword ptr [rsp + 0x20], rax            # save Edit HWND (consumed by the original mov rcx,rax)
+mov rcx, rax
+call 0x140280900                           # search_margin(hwnd) -> eax = scaled right margin
+shl eax, 16                                # MAKELONG(0, margin)
+mov r9d, eax                               # lParam
+mov rax, qword ptr [rsp + 0x20]            # restore Edit HWND
+add rsp, 0x30
+jmp 0x14004e17d                            # original continuation (mov r8d,2 ; ...)
+""",
+    ),
+    AssemblyBlock(
+        "lower_search_margin",
+        0x0970,
+        0x0995,
+        # Lower search Edit right margin, same as upper; continuation is the lower site's next insn.
+        r"""
+sub rsp, 0x30
+mov qword ptr [rsp + 0x20], rax            # save Edit HWND
+mov rcx, rax
+call 0x140280900                           # search_margin(hwnd) -> eax = scaled right margin
+shl eax, 16                                # MAKELONG(0, margin)
+mov r9d, eax                               # lParam
+mov rax, qword ptr [rsp + 0x20]            # restore Edit HWND
+add rsp, 0x30
+jmp 0x14004e0f0                            # original continuation (mov r8d,2 ; ...)
+""",
+    ),
 )
 
 
@@ -1119,21 +1183,27 @@ def make_get_dpi_unwind_info() -> bytes:
     return bytes((version_and_flags, prolog_size, unwind_code_count, frame_register)) + alloc_small + push_rbx
 
 
-def make_bar_metrics_unwind_info() -> bytes:
-    """Build x64 unwind metadata for the injected `bar_metrics` helper.
+def make_leaf_alloc_unwind_info(alloc_size: int) -> bytes:
+    """Build x64 unwind metadata for an injected helper whose only prologue op allocates stack.
 
-    The helper saves no nonvolatile registers; its only prologue op is `sub rsp, 0x38`
-    (a four-byte instruction), so one `UWOP_ALLOC_SMALL` fully describes its frame.
+    Used by helpers reached via `call` whose entire prologue is a single four-byte
+    `sub rsp, alloc_size` (imm8) and which save no nonvolatile registers, so one
+    `UWOP_ALLOC_SMALL` fully describes the frame.
+
+    Args:
+        alloc_size: Bytes reserved by `sub rsp, alloc_size`; a multiple of 8 in `[0x10, 0x80]`.
 
     Returns:
         A 4-byte-aligned UNWIND_INFO record for the helper.
     """
+    assert 0x10 <= alloc_size <= 0x80 and alloc_size % 8 == 0
+    op_info           = (alloc_size - 8) // 8
     version_and_flags = 0x01
     prolog_size       = 0x04
     unwind_code_count = 0x01
     frame_register    = 0x00
-    alloc_small       = bytes((0x04, 0x62))   # at prolog offset 4: (6 * 8) + 8 = 0x38
-    padding           = bytes((0x00, 0x00))   # pad the 6-byte record to a 4-byte boundary
+    alloc_small       = bytes((0x04, (op_info << 4) | 0x02))   # UWOP_ALLOC_SMALL at prolog offset 4
+    padding           = bytes((0x00, 0x00))                    # pad the 6-byte record to a 4-byte boundary
     return bytes((version_and_flags, prolog_size, unwind_code_count, frame_register)) + alloc_small + padding
 
 
@@ -1191,6 +1261,7 @@ def build_hidpi_payload(
         UNWIND_PARENT_MAIN_LAYOUT,
         UNWIND_PARENT_GRAPH_RENDERER,
         UNWIND_PARENT_MAIN_INIT,
+        UNWIND_PARENT_MAIN_CREATE,
     ):
         if parent not in original_runtime_functions:
             raise ValueError(f"Expected parent RUNTIME_FUNCTION {parent!r} is absent")
@@ -1202,13 +1273,15 @@ def build_hidpi_payload(
     new_runtime_functions: list[tuple[int, int, int]] = [
         (new_section_rva + 0x0000, new_section_rva + 0x0043, new_section_rva + get_dpi_unwind_offset)
     ]
-    bar_metrics_block = next(block for block in HIDPI_ASSEMBLY_BLOCKS if block.name == "bar_metrics")
-    bar_metrics_unwind_offset = append_aligned(payload, make_bar_metrics_unwind_info(), 4)
-    new_runtime_functions.append((
-        new_section_rva + bar_metrics_block.offset,
-        new_section_rva + bar_metrics_block.end_offset,
-        new_section_rva + bar_metrics_unwind_offset,
-    ))
+    blocks_by_name = {block.name: block for block in HIDPI_ASSEMBLY_BLOCKS}
+    for helper_name, alloc_size in (("bar_metrics", 0x38), ("search_margin", 0x28)):
+        helper_block = blocks_by_name[helper_name]
+        helper_unwind_offset = append_aligned(payload, make_leaf_alloc_unwind_info(alloc_size), 4)
+        new_runtime_functions.append((
+            new_section_rva + helper_block.offset,
+            new_section_rva + helper_block.end_offset,
+            new_section_rva + helper_unwind_offset,
+        ))
     for label, begin_offset, end_offset, stack_size, parent in HIDPI_CHAINED_RANGES:
         if not 0 <= begin_offset < end_offset <= len(hidpi_code):
             raise ValueError(f"{label}: unwind range is outside the injected code")

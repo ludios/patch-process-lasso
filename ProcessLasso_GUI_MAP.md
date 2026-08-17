@@ -442,6 +442,12 @@ becomes tall-and-narrow and the glass squishes. The `*_search_icon_square` patch
 right-aligned x from cached `right-1` (`app+0xc18` upper / `app+0xc28` lower) and set `cx = cy`.
 The GDI+ `GdipDrawImageRectI` (`0x05fb98`) is the *graph* image draw and is unrelated to the glass.
 
+Because the glass grows with DPI, the Edit's reserved text area must grow with it. Each Edit sets a
+fixed right margin at init via `EM_SETMARGINS(EC_RIGHTMARGIN, MAKELONG(0, 16))` — `mov r9d,0x100000`
+at `0x04e177` (upper) / `0x04e0ea` (lower). The `*_search_margin` patches scale that right margin to
+`MulDiv(22, dpi, 96) - 6` (the scaled icon width, using the just-created Edit HWND's DPI) so long
+search text and the caret are not clipped under the wider icon.
+
 ## Main-UI font (`app+0x4c8`)
 
 Built once during init at `0x04c855` (`SystemParametersInfoW(SPI_GETNONCLIENTMETRICS)` →
@@ -643,6 +649,8 @@ These are the build-lock sites in `patch_process_lasso_hidpi.py`. They are usefu
 | `main_system_parameters_info` | `0x04c855` | DPI-scale the main-UI font (`SystemParametersInfoForDpi`, HWND `app+0x878`) |
 | `upper_search_icon_square` | `0x051200` | make the upper search-glass `Static` square (right-aligned) |
 | `lower_search_icon_square` | `0x0519e7` | make the lower search-glass `Static` square (right-aligned) |
+| `upper_search_margin` | `0x04e177` | scale the upper search `Edit`'s `EM_SETMARGINS` right margin to the icon width |
+| `lower_search_margin` | `0x04e0ea` | scale the lower search `Edit`'s `EM_SETMARGINS` right margin |
 
 `PATCH_SITES` are `jmp`-into-`.hidpi` trampolines. A second group, `INPLACE_PATCH_SITES`, rewrites
 sites in place with equal-length assembly instead of jumping:
@@ -680,6 +688,9 @@ The patched `.hidpi` section is at RVA `0x280000` (`HIDPI_CODE_SIZE` is now `0xa
 +0x0820  main_system_parameters_info (main-UI font DPI redirect)
 +0x08c0  upper_search_icon_square
 +0x08e0  lower_search_icon_square
++0x0900  search_margin helper (returns MulDiv(22,dpi,96)-6 = scaled icon width)
++0x0930  upper_search_margin
++0x0970  lower_search_margin
 ```
 
 `bar_metrics` has its own standalone `RUNTIME_FUNCTION` (like `get_dpi`); the bar-height and
