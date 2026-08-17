@@ -16,7 +16,8 @@ EXPECTED_IMAGE_BASE = 0x140000000
 EXPECTED_NEW_SECTION_RVA = 0x280000
 EXPECTED_CERTIFICATE_OFFSET = 0x274600
 MANIFEST_DATA_ENTRY_OFFSET = 0x235970
-HIDPI_CODE_SIZE = 0x4CD
+LEGACY_HIDPI_CODE_SIZE = 0x4CD
+HIDPI_CODE_SIZE = 0x700
 HIDPI_CODE_BASE_VA = EXPECTED_IMAGE_BASE + EXPECTED_NEW_SECTION_RVA
 
 USER32_DLL_OFFSET = 0x03F0
@@ -34,6 +35,10 @@ HIDPI_SYMBOL_OFFSETS = {
     "card_rect":              0x02E0,
     "card_text":              0x0380,
     "system_parameters_info": 0x0420,
+    "fixed_load_reservation_1": 0x04E0,
+    "fixed_load_reservation_2": 0x0580,
+    "load2_gap": 0x0620,
+    "processor_gap": 0x0680,
 }
 
 PATCH_SITES = {
@@ -48,6 +53,10 @@ PATCH_SITES = {
     "system_parameters_info": (0x05BF46, bytes.fromhex("ff157c3d1700")),
     "card_rect":              (0x05D59C, bytes.fromhex("8b4c246083c1058b54246483c205448b45c04183c0164403c1458d680f448b4d90440faf4dc44183c1164403ca")),
     "card_text":              (0x05D61C, bytes.fromhex("8b5c246483c30d8b74246083c611")),
+    "fixed_load_reservation_1": (0x050A72, bytes.fromhex("8d429c83f83c7e0b83c2bf8997c8090000eb0341b601")),
+    "fixed_load_reservation_2": (0x050AB2, bytes.fromhex("8d429c83f83c7e0b8d4abf898fc8090000eb0341b401")),
+    "load2_gap":              (0x050C1E, bytes.fromhex("8b87d00a000083e805")),
+    "processor_gap":          (0x050CF3, bytes.fromhex("412bc083c20589442420")),
 }
 
 UNWIND_PARENT_GRAPH_HEIGHT = (0x050870, 0x0509F0, 0x20295C)
@@ -75,6 +84,14 @@ HIDPI_CHAINED_RANGES = (
     ("card_text_suffix",       0x03CA, 0x03E1, 0x00, UNWIND_PARENT_GRAPH_RENDERER),
     ("system_parameters_body", 0x0420, 0x04A8, 0x60, UNWIND_PARENT_GRAPH_RENDERER),
     ("system_parameters_tail", 0x04A8, 0x04B1, 0x00, UNWIND_PARENT_GRAPH_RENDERER),
+    ("fixed_load_reservation_1_body",   0x04E0, 0x054E, 0x40, UNWIND_PARENT_MAIN_LAYOUT),
+    ("fixed_load_reservation_1_suffix", 0x054E, 0x0566, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
+    ("fixed_load_reservation_2_body",   0x0580, 0x05F6, 0x40, UNWIND_PARENT_MAIN_LAYOUT),
+    ("fixed_load_reservation_2_suffix", 0x05F6, 0x0610, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
+    ("load2_gap_body",                 0x0620, 0x065C, 0x30, UNWIND_PARENT_MAIN_LAYOUT),
+    ("load2_gap_suffix",               0x065C, 0x066A, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
+    ("processor_gap_body",             0x0680, 0x06DC, 0x40, UNWIND_PARENT_MAIN_LAYOUT),
+    ("processor_gap_suffix",           0x06DC, 0x06EC, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
 )
 
 
@@ -105,12 +122,12 @@ push rbx
 sub rsp, 0x20
 mov rbx, rcx
 lea rcx, [rip + 0x3e1]                    # L"user32.dll"
-call qword ptr [rip - 0xb08f5]            # IAT GetModuleHandleW @ 0x141cf720
+call qword ptr [rip - 0xb08f5]            # IAT GetModuleHandleW @ 0x1401cf720
 test rax, rax
 je fallback
 mov rcx, rax
 lea rdx, [rip + 0x3e2]                    # "GetDpiForWindow"
-call qword ptr [rip - 0xb08f2]            # IAT GetProcAddress @ 0x141cf738
+call qword ptr [rip - 0xb08f2]            # IAT GetProcAddress @ 0x1401cf738
 test rax, rax
 je fallback
 mov rcx, rbx
@@ -139,7 +156,7 @@ call 0x140280000                           # get_dpi(hwnd)
 mov edx, eax
 mov ecx, dword ptr [rsp + 0x20]
 mov r8d, 0x60
-call qword ptr [rip - 0xb09f3]            # IAT MulDiv @ 0x141cf688
+call qword ptr [rip - 0xb09f3]            # IAT MulDiv @ 0x1401cf688
 add rsp, 0x30
 jmp 0x1400509e2                           # original continuation
 """,
@@ -391,6 +408,141 @@ call qword ptr [rip - 0xb07e0]            # IAT SystemParametersInfoW
 done:
 add rsp, 0x60
 jmp 0x14005bf4c                           # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "fixed_load_reservation_1",
+        0x04E0,
+        0x0566,
+        r"""
+sub rsp, 0x40
+mov dword ptr [rsp + 0x20], edx
+mov dword ptr [rsp + 0x24], r8d
+mov dword ptr [rsp + 0x28], r9d
+mov rcx, qword ptr [rdi + 0x870]
+call 0x140280000                           # get_dpi(hwnd)
+mov edx, eax
+mov ecx, 0x41                             # 65 px = 60 px display + 5 px gap
+mov r8d, 0x60
+call qword ptr [rip - 0xb0e89]            # MulDiv(65, dpi, 96)
+mov dword ptr [rsp + 0x2c], eax
+mov rcx, qword ptr [rdi + 0x870]
+call 0x140280000                           # get_dpi(hwnd)
+mov edx, eax
+mov ecx, 0xa0                             # original 100 + 60 minimum-space test
+mov r8d, 0x60
+call qword ptr [rip - 0xb0eac]            # MulDiv(160, dpi, 96)
+mov r11d, eax
+mov r10d, dword ptr [rsp + 0x2c]
+mov edx, dword ptr [rsp + 0x20]
+mov r8d, dword ptr [rsp + 0x24]
+mov r9d, dword ptr [rsp + 0x28]
+add rsp, 0x40
+cmp edx, r11d
+jle no_room
+sub edx, r10d
+mov dword ptr [rdi + 0x9c8], edx
+jmp done
+no_room:
+mov r14b, 1
+done:
+jmp 0x140050a88                           # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "fixed_load_reservation_2",
+        0x0580,
+        0x0610,
+        r"""
+sub rsp, 0x40
+mov dword ptr [rsp + 0x20], ecx
+mov dword ptr [rsp + 0x24], edx
+mov dword ptr [rsp + 0x28], r8d
+mov dword ptr [rsp + 0x2c], r9d
+mov rcx, qword ptr [rdi + 0x870]
+call 0x140280000                           # get_dpi(hwnd)
+mov edx, eax
+mov ecx, 0x41                             # 65 px = 60 px display + 5 px gap
+mov r8d, 0x60
+call qword ptr [rip - 0xb0f2d]            # MulDiv(65, dpi, 96)
+mov dword ptr [rsp + 0x30], eax
+mov rcx, qword ptr [rdi + 0x870]
+call 0x140280000                           # get_dpi(hwnd)
+mov edx, eax
+mov ecx, 0xa0                             # original 100 + 60 minimum-space test
+mov r8d, 0x60
+call qword ptr [rip - 0xb0f50]            # MulDiv(160, dpi, 96)
+mov r11d, eax
+mov r10d, dword ptr [rsp + 0x30]
+mov ecx, dword ptr [rsp + 0x20]
+mov edx, dword ptr [rsp + 0x24]
+mov r8d, dword ptr [rsp + 0x28]
+mov r9d, dword ptr [rsp + 0x2c]
+add rsp, 0x40
+cmp edx, r11d
+jle no_room
+mov ecx, edx
+sub ecx, r10d
+mov dword ptr [rdi + 0x9c8], ecx
+jmp done
+no_room:
+mov r12b, 1
+done:
+jmp 0x140050ac8                           # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "load2_gap",
+        0x0620,
+        0x066A,
+        r"""
+sub rsp, 0x30
+mov dword ptr [rsp + 0x20], ecx
+mov dword ptr [rsp + 0x24], r8d
+mov rcx, qword ptr [rdi + 0x870]
+call 0x140280000                           # get_dpi(hwnd)
+mov edx, eax
+mov ecx, 0x5
+mov r8d, 0x60
+call qword ptr [rip - 0xb0fc4]            # MulDiv(5, dpi, 96)
+mov r10d, eax
+mov ecx, dword ptr [rsp + 0x20]
+mov r8d, dword ptr [rsp + 0x24]
+add rsp, 0x30
+mov eax, dword ptr [rdi + 0xad0]
+sub eax, r10d
+jmp 0x140050c27                           # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "processor_gap",
+        0x0680,
+        0x06EC,
+        r"""
+sub rsp, 0x40
+mov qword ptr [rsp + 0x20], rcx
+mov dword ptr [rsp + 0x28], edx
+mov dword ptr [rsp + 0x2c], r8d
+mov dword ptr [rsp + 0x30], r9d
+sub eax, r8d
+mov dword ptr [rsp + 0x34], eax
+mov rcx, qword ptr [rdi + 0x870]
+call 0x140280000                           # get_dpi(hwnd)
+mov edx, eax
+mov ecx, 0x5
+mov r8d, 0x60
+call qword ptr [rip - 0xb1035]            # MulDiv(5, dpi, 96)
+mov r10d, eax
+mov rcx, qword ptr [rsp + 0x20]
+mov edx, dword ptr [rsp + 0x28]
+mov r8d, dword ptr [rsp + 0x2c]
+mov r9d, dword ptr [rsp + 0x30]
+mov r11d, dword ptr [rsp + 0x34]
+add rsp, 0x40
+add edx, r10d
+mov eax, r11d
+mov dword ptr [rsp + 0x20], r11d
+jmp 0x140050cfd                           # original continuation
 """,
     ),
 )
