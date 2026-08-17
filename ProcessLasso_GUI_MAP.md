@@ -448,6 +448,38 @@ at `0x04e177` (upper) / `0x04e0ea` (lower). The `*_search_margin` patches scale 
 `MulDiv(22, dpi, 96) - 6` (the scaled icon width, using the just-created Edit HWND's DPI) so long
 search text and the caret are not clipped under the wider icon.
 
+## Process-list icons: the shared shell-icon image list (`app+0x338`)
+
+The per-process icons in the `Process name` column come from a small icon cache living **inline in
+the app object at `app+0x330`**, constructed at `0x04b35e` (constructor `0x018770 .. 0x018c01`,
+inside the app-object constructor `0x04b260 .. 0x04bfe3`). Its fields:
+
+| Field | Meaning |
+|---|---|
+| `+0x00` (`app+0x330`) | `cGrow` for the image list, `0x100` |
+| `+0x08` (`app+0x338`) | `HIMAGELIST` |
+| `+0x10` (`app+0x340`) | image index of the default icon |
+| `+0x68` / `+0x78` | index / image-path maps used for lookup and eviction |
+
+Creation is `ImageList_Create(16, 16, ILC_COLOR32, 1, 0x100)` at `0x018849`, with `cy` written as a
+literal `16` by `mov edx,0x10` at `0x018836` and mirrored into `cx` by the following `mov ecx,edx`.
+Icons are extracted per image path by `ExtractAssociatedIconW` (wrapper `0x0186d0`, at large-icon
+size) and stretched into the list by `ImageList_ReplaceIcon` (`0x0188ec` for the `%s\svchost.exe`
+default, `0x018f5b` for each cached process, `0x05252b` for a `LoadIconW` resource icon at
+`app+0x340`); `ImageList_Remove` at `0x0191f6` evicts entries.
+
+The list is installed as `LVSIL_SMALL` on the four process `ListView`s (`app+0x888`, `+0x8e8`,
+`+0x990`, `+0x988`) by four `LVM_SETIMAGELIST` sends at `0x04f318 .. 0x04f38e`, and the ListViews
+draw the icons themselves — there is no `ImageList_Draw` xref. So the image list's own icon size is
+the only thing that decides how large a process icon renders, and it also sets the report-view row
+height floor.
+
+The `process_icon_size` patch replaces the `cy` literal with `MulDiv(16, dpi, 96)` and returns to
+the original `mov ecx,edx`, so `cx` follows and the icons stay square. The DPI comes from
+`GetDpiForSystem` (helper `get_system_dpi`), not `GetDpiForWindow`: this runs during app-object
+construction, before any window exists. An image list's icon size is also fixed for its lifetime and
+the app never rebuilds this one, so a per-monitor DPI would not stay correct anyway.
+
 ## Main-UI font (`app+0x4c8`)
 
 Built once during init at `0x04c855` (`SystemParametersInfoW(SPI_GETNONCLIENTMETRICS)` →
@@ -620,7 +652,7 @@ The patcher did **not** add a new import directory. Its `.hidpi` helper dynamica
 0x1401cf688  MulDiv
 ```
 
-It resolves `GetDpiForWindow` and `SystemParametersInfoForDpi` at runtime and falls back conservatively if unavailable.
+It resolves `GetDpiForWindow`, `GetDpiForSystem`, and `SystemParametersInfoForDpi` at runtime and falls back conservatively if unavailable.
 
 ---
 
@@ -651,6 +683,7 @@ These are the build-lock sites in `patch_process_lasso_hidpi.py`. They are usefu
 | `lower_search_icon_square` | `0x0519e7` | make the lower search-glass `Static` square (right-aligned) |
 | `upper_search_margin` | `0x04e177` | scale the upper search `Edit`'s `EM_SETMARGINS` right margin to the icon width |
 | `lower_search_margin` | `0x04e0ea` | scale the lower search `Edit`'s `EM_SETMARGINS` right margin |
+| `process_icon_size` | `0x018836` | scale the 16px process-icon image list (`ImageList_Create` `cx`/`cy`) |
 
 `PATCH_SITES` are `jmp`-into-`.hidpi` trampolines. A second group, `INPLACE_PATCH_SITES`, rewrites
 sites in place with equal-length assembly instead of jumping:
@@ -664,7 +697,7 @@ sites in place with equal-length assembly instead of jumping:
 | `lower_child_{b4c,b7c,b9c,a5c}` | `0x05192d` / `0x051bb5` / `0x051dc5` / `0x051ff4` | NOP the 22px stores |
 | `upper_search_icon_width` | `0x051224` | `mov [rsp+0x20],eax` (square side) instead of fixed 16px cx |
 
-The patched `.hidpi` section is at RVA `0x280000` (`HIDPI_CODE_SIZE` is now `0xa00`). Symbol offsets:
+The patched `.hidpi` section is at RVA `0x280000` (`HIDPI_CODE_SIZE` is now `0xb00`). Symbol offsets:
 
 ```text
 +0x0000  get_dpi helper
@@ -691,12 +724,22 @@ The patched `.hidpi` section is at RVA `0x280000` (`HIDPI_CODE_SIZE` is now `0xa
 +0x0900  search_margin helper (returns MulDiv(22,dpi,96)-6 = scaled icon width)
 +0x0930  upper_search_margin
 +0x0970  lower_search_margin
++0x09a0  get_system_dpi helper (GetDpiForSystem, for callers that have no HWND)
++0x0a00  process_icon_size
 ```
 
-`bar_metrics` has its own standalone `RUNTIME_FUNCTION` (like `get_dpi`); the bar-height and
-`main_system_parameters_info` trampolines chain body/suffix into their function's parent
-(`UNWIND_PARENT_MAIN_LAYOUT` and `UNWIND_PARENT_MAIN_INIT` respectively); the call-free search-icon
-trampolines chain into `UNWIND_PARENT_MAIN_LAYOUT` with no stack frame.
+Generated data strings sit at `+0x03f0` (`L"user32.dll"`), `+0x0406` (`"GetDpiForWindow"`),
+`+0x04b2` (`"SystemParametersInfoForDpi"`), and `+0x04d0` (`"GetDpiForSystem"`).
+
+`bar_metrics`, `search_margin`, and `get_system_dpi` have their own standalone `RUNTIME_FUNCTION`s
+(like `get_dpi`); the bar-height and `main_system_parameters_info` trampolines chain body/suffix into
+their function's parent (`UNWIND_PARENT_MAIN_LAYOUT` and `UNWIND_PARENT_MAIN_INIT` respectively);
+the call-free search-icon trampolines chain into `UNWIND_PARENT_MAIN_LAYOUT` with no stack frame;
+`process_icon_size` chains into `UNWIND_PARENT_ICON_CACHE_INIT` (`0x018770 .. 0x018c01`).
+
+Trampolines entered by `jmp` inherit a 16-byte-aligned `rsp` and allocate a multiple of 16
+(`0x30`/`0x40`/`0x60`); helpers entered by `call` inherit `rsp ≡ 8 (mod 16)` and allocate
+`0x28`/`0x38`. Either way `rsp` must be 16-byte aligned at each `call` they make.
 
 The injected x86-64 is authored as Intel-syntax assembly and assembled by the GNU binutils toolchain (`as`, `ld`, `objcopy`). Original hook-site bytes are retained as immutable build fingerprints.
 

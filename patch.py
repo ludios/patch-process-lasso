@@ -20,12 +20,13 @@ EXPECTED_NEW_SECTION_RVA = 0x280000
 EXPECTED_CERTIFICATE_OFFSET = 0x274600
 MANIFEST_DATA_ENTRY_OFFSET = 0x235970
 LEGACY_HIDPI_CODE_SIZE = 0x4CD
-HIDPI_CODE_SIZE = 0xA00
+HIDPI_CODE_SIZE = 0xB00
 HIDPI_CODE_BASE_VA = EXPECTED_IMAGE_BASE + EXPECTED_NEW_SECTION_RVA
 
 USER32_DLL_OFFSET = 0x03F0
 GET_DPI_FOR_WINDOW_NAME_OFFSET = 0x0406
 SYSTEM_PARAMETERS_INFO_FOR_DPI_NAME_OFFSET = 0x04B2
+GET_DPI_FOR_SYSTEM_NAME_OFFSET = 0x04D0
 
 HIDPI_SYMBOL_OFFSETS = {
     "graph_height":           0x0050,
@@ -49,6 +50,7 @@ HIDPI_SYMBOL_OFFSETS = {
     "lower_search_icon_square": 0x08E0,
     "upper_search_margin": 0x0930,
     "lower_search_margin": 0x0970,
+    "process_icon_size": 0x0A00,
 }
 
 PATCH_SITES = {
@@ -73,6 +75,7 @@ PATCH_SITES = {
     "lower_search_icon_square":    (0x0519E7, bytes.fromhex("412bc1412bc8")),
     "upper_search_margin":         (0x04E177, bytes.fromhex("41b900001000")),
     "lower_search_margin":         (0x04E0EA, bytes.fromhex("41b900001000")),
+    "process_icon_size":           (0x018836, bytes.fromhex("ba10000000")),
 }
 
 # In-place instruction replacements that do not trampoline into `.hidpi`. Each maps a
@@ -107,6 +110,7 @@ UNWIND_PARENT_MAIN_LAYOUT  = (0x0509F0, 0x0521BE, 0x202978)
 UNWIND_PARENT_GRAPH_RENDERER = (0x05BE30, 0x05E8EF, 0x20348C)
 UNWIND_PARENT_MAIN_INIT = (0x04C750, 0x04D62A, 0x202718)
 UNWIND_PARENT_MAIN_CREATE = (0x04DCB0, 0x050868, 0x202818)
+UNWIND_PARENT_ICON_CACHE_INIT = (0x018770, 0x018C01, 0x1FD968)
 
 HIDPI_CHAINED_RANGES = (
     ("graph_height_prefix",    0x0050, 0x0055, 0x00, UNWIND_PARENT_GRAPH_HEIGHT),
@@ -149,6 +153,8 @@ HIDPI_CHAINED_RANGES = (
     ("upper_search_margin_tail",       0x094C, 0x0955, 0x00, UNWIND_PARENT_MAIN_CREATE),
     ("lower_search_margin_body",       0x0970, 0x098C, 0x30, UNWIND_PARENT_MAIN_CREATE),
     ("lower_search_margin_tail",       0x098C, 0x0995, 0x00, UNWIND_PARENT_MAIN_CREATE),
+    ("process_icon_size_body",         0x0A00, 0x0A28, 0x30, UNWIND_PARENT_ICON_CACHE_INIT),
+    ("process_icon_size_tail",         0x0A28, 0x0A31, 0x00, UNWIND_PARENT_ICON_CACHE_INIT),
 )
 
 
@@ -818,6 +824,61 @@ add rsp, 0x30
 jmp 0x14004e0f0                            # original continuation (mov r8d,2 ; ...)
 """,
     ),
+    AssemblyBlock(
+        "get_system_dpi",
+        0x09A0,
+        0x09DB,
+        # `get_dpi` for callers that have no window: resolves GetDpiForSystem (Windows 10 1607+)
+        # and falls back to 96 when it is unavailable or fails. Takes no argument, so unlike
+        # `get_dpi` it needs no nonvolatile register and its whole prologue is one stack alloc.
+        r"""
+sub rsp, 0x28
+lea rcx, [rip - 0x5bb]                     # L"user32.dll" at .hidpi+0x03f0
+call qword ptr [rip - 0xb1291]             # IAT GetModuleHandleW, RVA 0x1cf720
+test rax, rax
+je fallback
+mov rcx, rax
+lea rdx, [rip - 0x4f0]                     # "GetDpiForSystem" at .hidpi+0x04d0
+call qword ptr [rip - 0xb128e]             # IAT GetProcAddress, RVA 0x1cf738
+test rax, rax
+je fallback
+call rax                                   # GetDpiForSystem()
+test eax, eax
+jne done
+fallback:
+mov eax, 0x60                              # USER_DEFAULT_SCREEN_DPI
+done:
+add rsp, 0x28
+ret
+""",
+    ),
+    AssemblyBlock(
+        "process_icon_size",
+        0x0A00,
+        0x0A31,
+        # DPI-scale the process-list icons: the shared shell-icon image list is created 16x16 at
+        # 0x018836, so the ListViews draw every process icon at its 96-DPI size. Replace the fixed
+        # `cy` with MulDiv(16, dpi, 96) and return to the original `mov ecx,edx`, which mirrors it
+        # into `cx`. The size is fixed for the image list's lifetime and this runs during app-object
+        # construction, before any window exists, so the system DPI is both the only DPI available
+        # and the only one that stays meaningful. A 16 px floor keeps a failed MulDiv (-1) or an
+        # implausible sub-96 DPI from producing an image list that ImageList_Create would reject.
+        r"""
+sub rsp, 0x30
+call 0x1402809a0                           # get_system_dpi() -> eax = dpi
+mov edx, eax
+mov ecx, 0x10                              # 16 (original shell small-icon side)
+mov r8d, 0x60
+call qword ptr [rip - 0xb1394]             # MulDiv(16, dpi, 96) via IAT 0x1401cf688
+cmp eax, 0x10
+jge scaled
+mov eax, 0x10
+scaled:
+mov edx, eax                               # cy = scaled icon side
+add rsp, 0x30
+jmp 0x14001883b                            # original continuation (mov ecx,edx -> cx = cy)
+""",
+    ),
 )
 
 
@@ -988,6 +1049,7 @@ def assemble_hidpi_code() -> bytes:
         (USER32_DLL_OFFSET, "user32.dll".encode("utf-16le") + b"\0\0", "user32.dll"),
         (GET_DPI_FOR_WINDOW_NAME_OFFSET, b"GetDpiForWindow\0", "GetDpiForWindow"),
         (SYSTEM_PARAMETERS_INFO_FOR_DPI_NAME_OFFSET, b"SystemParametersInfoForDpi\0", "SystemParametersInfoForDpi"),
+        (GET_DPI_FOR_SYSTEM_NAME_OFFSET, b"GetDpiForSystem\0", "GetDpiForSystem"),
     )
     for offset, content, label in data_items:
         place_bytes(code, occupied, offset, content, label)
@@ -1262,6 +1324,7 @@ def build_hidpi_payload(
         UNWIND_PARENT_GRAPH_RENDERER,
         UNWIND_PARENT_MAIN_INIT,
         UNWIND_PARENT_MAIN_CREATE,
+        UNWIND_PARENT_ICON_CACHE_INIT,
     ):
         if parent not in original_runtime_functions:
             raise ValueError(f"Expected parent RUNTIME_FUNCTION {parent!r} is absent")
@@ -1274,7 +1337,7 @@ def build_hidpi_payload(
         (new_section_rva + 0x0000, new_section_rva + 0x0043, new_section_rva + get_dpi_unwind_offset)
     ]
     blocks_by_name = {block.name: block for block in HIDPI_ASSEMBLY_BLOCKS}
-    for helper_name, alloc_size in (("bar_metrics", 0x38), ("search_margin", 0x28)):
+    for helper_name, alloc_size in (("bar_metrics", 0x38), ("search_margin", 0x28), ("get_system_dpi", 0x28)):
         helper_block = blocks_by_name[helper_name]
         helper_unwind_offset = append_aligned(payload, make_leaf_alloc_unwind_info(alloc_size), 4)
         new_runtime_functions.append((

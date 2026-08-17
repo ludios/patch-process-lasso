@@ -85,6 +85,29 @@ class AssemblyRegressionTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(actual).hexdigest(), expected_hash)
 
     @unittest.skipUnless(BINUTILS_AVAILABLE, "GNU binutils (as/ld/objcopy) not found on PATH")
+    def test_process_icon_blocks_match_independent_reference(self) -> None:
+        """Pin the process-list icon-size trampoline and its windowless DPI helper."""
+        expected_sha256 = {
+            "get_system_dpi": "7ab3eecb9af40d9f91d47bf3a55e8b26c00adb05f2006042f7f5c11307675114",
+            "process_icon_size": "6dbd6335e49ac898957bbc077bb566c8e8b15dca66c055e7a48583463718e34e",
+        }
+        blocks = {block.name: block for block in patcher.HIDPI_ASSEMBLY_BLOCKS}
+        for name, expected_hash in expected_sha256.items():
+            with self.subTest(block=name):
+                block   = blocks[name]
+                address = patcher.HIDPI_CODE_BASE_VA + block.offset
+                actual  = patcher.assemble_x86_64(block.source, address)
+                self.assertEqual(hashlib.sha256(actual).hexdigest(), expected_hash)
+
+    def test_process_icon_hook_replaces_the_whole_16_px_image_list_size(self) -> None:
+        """Require the icon hook to cover the fixed `cy` and to resume at its `cx` copy."""
+        rva, original_bytes = patcher.PATCH_SITES["process_icon_size"]
+        self.assertEqual(rva, 0x018836)
+        self.assertEqual(original_bytes, bytes.fromhex("ba10000000"))          # mov edx, 16
+        blocks = {block.name: block for block in patcher.HIDPI_ASSEMBLY_BLOCKS}
+        self.assertIn("jmp 0x14001883b", blocks["process_icon_size"].source)   # mov ecx, edx
+
+    @unittest.skipUnless(BINUTILS_AVAILABLE, "GNU binutils (as/ld/objcopy) not found on PATH")
     def test_inplace_replacements_preserve_slice_length(self) -> None:
         """Require each in-place replacement to reassemble to its original slice length."""
         for name, (rva, expected, replacement_source) in patcher.INPLACE_PATCH_SITES.items():
@@ -135,6 +158,14 @@ class AssemblyRegressionTests(unittest.TestCase):
                 patcher.SYSTEM_PARAMETERS_INFO_FOR_DPI_NAME_OFFSET + len(spi_name)
             ],
             spi_name,
+        )
+        system_dpi_name = b"GetDpiForSystem\0"
+        self.assertEqual(
+            code[
+                patcher.GET_DPI_FOR_SYSTEM_NAME_OFFSET:
+                patcher.GET_DPI_FOR_SYSTEM_NAME_OFFSET + len(system_dpi_name)
+            ],
+            system_dpi_name,
         )
 
     @unittest.skipUnless(BINUTILS_AVAILABLE, "GNU binutils (as/ld/objcopy) not found on PATH")
