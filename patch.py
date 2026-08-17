@@ -20,7 +20,7 @@ EXPECTED_NEW_SECTION_RVA = 0x280000
 EXPECTED_CERTIFICATE_OFFSET = 0x274600
 MANIFEST_DATA_ENTRY_OFFSET = 0x235970
 LEGACY_HIDPI_CODE_SIZE = 0x4CD
-HIDPI_CODE_SIZE = 0x900
+HIDPI_CODE_SIZE = 0xA00
 HIDPI_CODE_BASE_VA = EXPECTED_IMAGE_BASE + EXPECTED_NEW_SECTION_RVA
 
 USER32_DLL_OFFSET = 0x03F0
@@ -44,6 +44,9 @@ HIDPI_SYMBOL_OFFSETS = {
     "processor_gap": 0x0680,
     "upper_bar_height": 0x0760,
     "lower_bar_height": 0x07B0,
+    "main_system_parameters_info": 0x0820,
+    "upper_search_icon_square": 0x08C0,
+    "lower_search_icon_square": 0x08E0,
 }
 
 PATCH_SITES = {
@@ -63,6 +66,9 @@ PATCH_SITES = {
     "fixed_load_reservation_2": (0x050AB2, bytes.fromhex("8d429c83f83c7e0b8d4abf898fc8090000eb0341b401")),
     "load2_gap":              (0x050C1E, bytes.fromhex("8b87d00a000083e805")),
     "processor_gap":          (0x050CF3, bytes.fromhex("412bc083c20589442420")),
+    "main_system_parameters_info": (0x04C855, bytes.fromhex("ff156d341800")),
+    "upper_search_icon_square":    (0x051200, bytes.fromhex("412bc1782d")),
+    "lower_search_icon_square":    (0x0519E7, bytes.fromhex("412bc1412bc8")),
 }
 
 # In-place instruction replacements that do not trampoline into `.hidpi`. Each maps a
@@ -87,11 +93,15 @@ INPLACE_PATCH_SITES = {
     "lower_child_b7c": (0x051BB5, bytes.fromhex("c7877c0b000016000000"), _NOP10),
     "lower_child_b9c": (0x051DC5, bytes.fromhex("c7879c0b000016000000"), _NOP10),
     "lower_child_a5c": (0x051FF4, bytes.fromhex("c7875c0a000016000000"), _NOP10),
+    # Upper search-icon Static width: use the square side its trampoline leaves live in eax
+    # instead of the fixed 16 px, so the stretched HICON keeps a 1:1 aspect ratio.
+    "upper_search_icon_width": (0x051224, bytes.fromhex("c744242010000000"), "mov dword ptr [rsp + 0x20], eax\n" + _NOP3 + "\nnop"),
 }
 
 UNWIND_PARENT_GRAPH_HEIGHT = (0x050870, 0x0509F0, 0x20295C)
 UNWIND_PARENT_MAIN_LAYOUT  = (0x0509F0, 0x0521BE, 0x202978)
 UNWIND_PARENT_GRAPH_RENDERER = (0x05BE30, 0x05E8EF, 0x20348C)
+UNWIND_PARENT_MAIN_INIT = (0x04C750, 0x04D62A, 0x202718)
 
 HIDPI_CHAINED_RANGES = (
     ("graph_height_prefix",    0x0050, 0x0055, 0x00, UNWIND_PARENT_GRAPH_HEIGHT),
@@ -126,6 +136,10 @@ HIDPI_CHAINED_RANGES = (
     ("upper_bar_height_suffix",        0x078C, 0x07AD, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
     ("lower_bar_height_body",          0x07B0, 0x07E6, 0x30, UNWIND_PARENT_MAIN_LAYOUT),
     ("lower_bar_height_suffix",        0x07E6, 0x0816, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
+    ("main_system_parameters_body",    0x0820, 0x08A8, 0x60, UNWIND_PARENT_MAIN_INIT),
+    ("main_system_parameters_tail",    0x08A8, 0x08B1, 0x00, UNWIND_PARENT_MAIN_INIT),
+    ("upper_search_icon_square",       0x08C0, 0x08DF, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
+    ("lower_search_icon_square",       0x08E0, 0x08FD, 0x00, UNWIND_PARENT_MAIN_LAYOUT),
 )
 
 
@@ -658,6 +672,88 @@ test ecx, ecx                              # recreate the sign flag consumed by 
 jmp 0x1400518c7                            # original cached-bottom store: mov [rdi+0xa1c],eax
 """,
     ),
+    AssemblyBlock(
+        "main_system_parameters_info",
+        0x0820,
+        0x08B1,
+        # DPI-scale the main-UI font: redirect SystemParametersInfoW(SPI_GETNONCLIENTMETRICS) at
+        # 0x04c855 to SystemParametersInfoForDpi. The main window (app+0x870) does not exist yet at
+        # this init point, but the hidden notification window (app+0x878) is already live and is a
+        # valid GetDpiForWindow input. Same call shape as the graph `system_parameters_info` block;
+        # reuses the same user32.dll / SystemParametersInfoForDpi data strings. All references are
+        # rel32 / RIP-relative (ASLR-safe); the returned API pointer comes from GetProcAddress.
+        r"""
+sub rsp, 0x60
+mov dword ptr [rsp + 0x30], ecx
+mov qword ptr [rsp + 0x38], rdx
+mov qword ptr [rsp + 0x40], r8
+mov qword ptr [rsp + 0x48], r9
+mov rcx, qword ptr [rbx + 0x878]           # live hidden notification-window HWND
+call 0x140280000                           # get_dpi(hwnd)
+mov dword ptr [rsp + 0x50], eax
+lea rcx, [rip - 0x45e]                      # L"user32.dll" at .hidpi+0x03f0
+call qword ptr [rip - 0xb1134]             # IAT GetModuleHandleW, RVA 0x1cf720
+test rax, rax
+je fallback
+mov rcx, rax
+lea rdx, [rip - 0x3b1]                      # "SystemParametersInfoForDpi" at .hidpi+0x04b2
+call qword ptr [rip - 0xb1131]             # IAT GetProcAddress, RVA 0x1cf738
+test rax, rax
+je fallback
+mov ecx, dword ptr [rsp + 0x30]
+mov rdx, qword ptr [rsp + 0x38]
+mov r8, qword ptr [rsp + 0x40]
+mov r9, qword ptr [rsp + 0x48]
+mov r10d, dword ptr [rsp + 0x50]
+mov dword ptr [rsp + 0x20], r10d           # fifth arg: dpi
+call rax                                   # SystemParametersInfoForDpi(...)
+jmp done
+fallback:
+mov ecx, dword ptr [rsp + 0x30]
+mov rdx, qword ptr [rsp + 0x38]
+mov r8, qword ptr [rsp + 0x40]
+mov r9, qword ptr [rsp + 0x48]
+call qword ptr [rip - 0xb0be0]             # IAT SystemParametersInfoW, RVA 0x1cfcc8
+done:
+add rsp, 0x60
+jmp 0x14004c85b                            # original continuation
+""",
+    ),
+    AssemblyBlock(
+        "upper_search_icon_square",
+        0x08C0,
+        0x08DF,
+        # Make the upper search-glass Static square. At the hook, eax=bottom-2, r9d=top+2; the
+        # original `sub eax,r9d` yields the icon side (client height - 4). Recompute the right-aligned
+        # x = (right-1) - side using the cached right-1 (app+0xc18), leaving it in r8d (the SetWindowPos
+        # X register) and updating the cached x (app+0xc10). The paired in-place width patch at
+        # 0x051224 stores this side as cx, so cx == cy and SS_REALSIZECONTROL cannot distort the icon.
+        r"""
+sub eax, r9d                               # side = (bottom-2) - (top+2)
+js 0x140051232                             # preserve the original invalid-height exit
+mov r8d, dword ptr [rdi + 0xc18]           # cached right-1
+sub r8d, eax                               # x = (right-1) - side
+mov dword ptr [rdi + 0xc10], r8d           # keep cached x consistent
+jmp 0x140051205                            # resume at the original x/y validity tests
+""",
+    ),
+    AssemblyBlock(
+        "lower_search_icon_square",
+        0x08E0,
+        0x08FD,
+        # Lower search-glass Static, same square geometry. The hook replaces `sub eax,r9d; sub ecx,r8d`
+        # (cy and the fixed-16 cx). Compute side=cy in eax, x=(right-1)-side in r8d from cached right-1
+        # (app+0xc28), set cx=side in ecx, and recreate the sign flag the original js at 0x0519ed reads.
+        r"""
+sub eax, r9d                               # side = (bottom-2) - (top+2)
+mov r8d, dword ptr [rdi + 0xc28]           # cached right-1
+sub r8d, eax                               # x = (right-1) - side
+mov dword ptr [rdi + 0xc20], r8d           # keep cached x consistent
+mov ecx, eax                               # cx = side (== cy)
+test ecx, ecx                              # recreate the sign flag consumed by the original js
+jmp 0x1400519ed                            # original validity tests + SetWindowPos
+""",
+    ),
 )
 
 
@@ -1090,7 +1186,12 @@ def build_hidpi_payload(
         struct.unpack_from("<III", original_exception_table, offset)
         for offset in range(0, exception_size, 12)
     }
-    for parent in (UNWIND_PARENT_GRAPH_HEIGHT, UNWIND_PARENT_MAIN_LAYOUT, UNWIND_PARENT_GRAPH_RENDERER):
+    for parent in (
+        UNWIND_PARENT_GRAPH_HEIGHT,
+        UNWIND_PARENT_MAIN_LAYOUT,
+        UNWIND_PARENT_GRAPH_RENDERER,
+        UNWIND_PARENT_MAIN_INIT,
+    ):
         if parent not in original_runtime_functions:
             raise ValueError(f"Expected parent RUNTIME_FUNCTION {parent!r} is absent")
     hidpi_code = assemble_hidpi_code()

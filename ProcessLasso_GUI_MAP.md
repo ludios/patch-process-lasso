@@ -428,6 +428,31 @@ at `0x050da8`, `lower_bar_height` at `0x0518bc`) call a shared `bar_metrics` hel
 32 live in `r10d` for the patched `cy` stores, and pre-write the scaled 22 into the child-bottom
 fields so the original `0x16` stores can be NOP'd. See the patch-site map below.
 
+## Search boxes and the magnifying-glass icons
+
+Each strip's search box is a native `Edit` (upper `app+0x970`, lower `app+0x940`, class `Edit`,
+style `0x52800080`, subclassed at `0x0e94b0` / `0x0e9330`). The magnifying glass is a **child
+`Static`** (upper `app+0x9a8` created `0x04e2cd`, lower `app+0x9b0` created `0x04e274`, style
+`0x50000943` = `SS_ICON|SS_REALSIZECONTROL|SS_NOTIFY|SS_REALSIZEIMAGE`). Both hold the `SIID_FIND`
+shell stock icon (`SHGetStockIconInfo` helper at `0x107c90`, HICON cached at `app+0x4d0`, installed
+with `STM_SETIMAGE` at `0x04e2e9`/`0x04e305`). Because the style lacks `SS_CENTERIMAGE`,
+`SS_REALSIZECONTROL` stretches the square HICON to the control rect. The layout gives that rect a
+fixed `cx=16` but a height of `client_height-4`; once the Edit cell height is DPI-scaled the rect
+becomes tall-and-narrow and the glass squishes. The `*_search_icon_square` patches recompute the
+right-aligned x from cached `right-1` (`app+0xc18` upper / `app+0xc28` lower) and set `cx = cy`.
+The GDI+ `GdipDrawImageRectI` (`0x05fb98`) is the *graph* image draw and is unrelated to the glass.
+
+## Main-UI font (`app+0x4c8`)
+
+Built once during init at `0x04c855` (`SystemParametersInfoW(SPI_GETNONCLIENTMETRICS)` →
+`CreateFontIndirectW` on `lfCaptionFont`), stored at `app+0x4c8`, and distributed by `WM_SETFONT`
+around `0x050082` to the tabs (`+0x8d0`/`+0x8a8`), search Edits (`+0x970`/`+0x940`), `+0x920`, and
+the fixed load displays (`+0x790`/`+0x798`/`+0x7a0`/`+0x810`). It was **not** DPI-scaled, so the bar
+text stayed 96-DPI-small. `main_system_parameters_info` redirects `0x04c855` to
+`SystemParametersInfoForDpi` using the DPI of the hidden notification window `app+0x878` (the main
+window `app+0x870` is created later at `0x04ca05`, so it is null at font-build time). The app has no
+`WM_DPICHANGED` handler and never rebuilds this font, so this provides startup/system-DPI scaling.
+
 # CPU-core utilization graph
 
 Class string:
@@ -615,6 +640,9 @@ These are the build-lock sites in `patch_process_lasso_hidpi.py`. They are usefu
 | `system_parameters_info` | `0x05bf46` | use `SystemParametersInfoForDpi` for graph font metrics |
 | `card_rect` | `0x05d59c` | scale dashboard/card rectangle offsets |
 | `card_text` | `0x05d61c` | scale dashboard/card text offsets |
+| `main_system_parameters_info` | `0x04c855` | DPI-scale the main-UI font (`SystemParametersInfoForDpi`, HWND `app+0x878`) |
+| `upper_search_icon_square` | `0x051200` | make the upper search-glass `Static` square (right-aligned) |
+| `lower_search_icon_square` | `0x0519e7` | make the lower search-glass `Static` square (right-aligned) |
 
 `PATCH_SITES` are `jmp`-into-`.hidpi` trampolines. A second group, `INPLACE_PATCH_SITES`, rewrites
 sites in place with equal-length assembly instead of jumping:
@@ -626,8 +654,9 @@ sites in place with equal-length assembly instead of jumping:
 | `lower_bar_cy` | `0x0518e3` | same for the lower strip |
 | `upper_child_bac` / `upper_child_acc` | `0x050e50` / `0x050e8e` | NOP the 22px stores (trampoline pre-writes scaled) |
 | `lower_child_{b4c,b7c,b9c,a5c}` | `0x05192d` / `0x051bb5` / `0x051dc5` / `0x051ff4` | NOP the 22px stores |
+| `upper_search_icon_width` | `0x051224` | `mov [rsp+0x20],eax` (square side) instead of fixed 16px cx |
 
-The patched `.hidpi` section is at RVA `0x280000` (`HIDPI_CODE_SIZE` is now `0x900`). Symbol offsets:
+The patched `.hidpi` section is at RVA `0x280000` (`HIDPI_CODE_SIZE` is now `0xa00`). Symbol offsets:
 
 ```text
 +0x0000  get_dpi helper
@@ -648,10 +677,15 @@ The patched `.hidpi` section is at RVA `0x280000` (`HIDPI_CODE_SIZE` is now `0x9
 +0x0700  bar_metrics helper (returns scaled 32 in eax, scaled 22 in edx)
 +0x0760  upper_bar_height
 +0x07b0  lower_bar_height
++0x0820  main_system_parameters_info (main-UI font DPI redirect)
++0x08c0  upper_search_icon_square
++0x08e0  lower_search_icon_square
 ```
 
-`bar_metrics` has its own standalone `RUNTIME_FUNCTION` (like `get_dpi`); both bar trampolines chain
-their body/suffix ranges into `UNWIND_PARENT_MAIN_LAYOUT`.
+`bar_metrics` has its own standalone `RUNTIME_FUNCTION` (like `get_dpi`); the bar-height and
+`main_system_parameters_info` trampolines chain body/suffix into their function's parent
+(`UNWIND_PARENT_MAIN_LAYOUT` and `UNWIND_PARENT_MAIN_INIT` respectively); the call-free search-icon
+trampolines chain into `UNWIND_PARENT_MAIN_LAYOUT` with no stack frame.
 
 The injected x86-64 is authored as Intel-syntax assembly and assembled by the GNU binutils toolchain (`as`, `ld`, `objcopy`). Original hook-site bytes are retained as immutable build fingerprints.
 
@@ -856,7 +890,7 @@ These are deliberately called out so a future session does not mistake inference
 - The CPU-core graph's actual hot drawing primitive path has not been fully decomposed; custom-message handlers are the better next entry point than hunting only for `WM_PAINT`.
 - The top graph's repeated 10-pixel sample/grid spacing has not been DPI-scaled. It currently looks acceptable but is a known logical-pixel remnant.
 - The renderer's `0x68`-byte history record layout has not been field-mapped.
-- The main-UI HFONT (stored at main object `+0x4c8`, used by the tab-strip command bars and their child buttons via `WM_SETFONT` at `0x05008d`/`0x0500ac`) is built from `SystemParametersInfoW` at `0x04c855` — the non-DPI call, unlike the graph font path already redirected to `SystemParametersInfoForDpi`. Scaling the bar geometry fixes the clipping, but if bar text looks mis-sized across monitors, this font path (and its recreation lifecycle) is the next target, not another height constant.
+- The six overlaid command **buttons** (`+0x900`, `+0x8f8`, `+0x9a0`, `+0x958`, `+0x968`, `+0x8c8`) are standard `BS_PUSHBUTTON`s (style `0x50000000`) and are **not** in the `WM_SETFONT` distribution at `0x050082`, so they do not receive `app+0x4c8`. Whether the `main_system_parameters_info` font fix enlarges their captions therefore depends on what default font they resolve; if their captions stay small after that patch, the follow-up is to send `WM_SETFONT(app+0x4c8, TRUE)` to those live button HWNDs after creation (needs a runtime `WM_GETFONT` check to confirm).
 
 ---
 
