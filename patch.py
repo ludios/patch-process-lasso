@@ -601,6 +601,7 @@ class PeLayout:
 
 
 BINUTILS_TOOLS = ("as", "ld", "objcopy")
+ELF_MAGIC = b"\x7fELF"
 
 
 def strip_assembly_comments(source: str) -> str:
@@ -662,6 +663,13 @@ def assemble_x86_64(source: str, address: int) -> bytes:
         linked_path, binary_path = work / "block.elf", work / "block.bin"
         source_path.write_text(program)
         run_binutils_step(["as", "--64", "-o", str(object_path), str(source_path)])
+        if object_path.read_bytes()[:4] != ELF_MAGIC:
+            raise RuntimeError(
+                "This patcher requires an ELF-targeted GNU binutils: absolute branch "
+                "targets are resolved through ELF relocations during `ld -Ttext`. The "
+                f"assembler at {shutil.which('as')} produced a non-ELF object, so a COFF "
+                "toolchain such as MSYS2/MinGW is not supported; use Linux/NixOS binutils."
+            )
         run_binutils_step(["ld", f"-Ttext=0x{address:x}", "-e", "0", "-o", str(linked_path), str(object_path)])
         run_binutils_step(["objcopy", "-O", "binary", "--only-section=.text", str(linked_path), str(binary_path)])
         return binary_path.read_bytes()
