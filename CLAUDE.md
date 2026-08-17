@@ -6,7 +6,7 @@ nm, ripgrep, ripgrep-all, node, deno, pnpm, oxfmt, oxlint, jq, python3, uv, gara
 
 Before starting or resuming work, check what `hostname` outputs.
 
-- If "clank" or "zclank", you're unable to hit the production databases or make real trades; run whatever commands you need.
+- If "xclank" or "zclank", run whatever commands you need.
 - If anything else, stop and ask the user to add their hostname to this file.
 
 # Reverse-engineering map
