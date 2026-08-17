@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
+# Model-output: Claude Fable 5
 """Patch the exact Process Lasso build supplied on 2026-08-17 for Per-Monitor V2 HiDPI."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib
+import shutil
 import struct
-import keystone
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
 
 EXPECTED_SHA256 = "3bfdbad16ddf47e2e9d303294c9f6de90eb90f6856bc0126e27bc1bd30e4e884"
 EXPECTED_IMAGE_BASE = 0x140000000
@@ -599,8 +600,11 @@ class PeLayout:
     sections: tuple[Section, ...]
 
 
+BINUTILS_TOOLS = ("as", "ld", "objcopy")
+
+
 def strip_assembly_comments(source: str) -> str:
-    """Remove human-readable `#` comments before passing assembly to Keystone.
+    """Remove human-readable `#` comments before assembling.
 
     Args:
         source: Intel-syntax assembly source that may contain trailing `#` comments.
@@ -616,23 +620,51 @@ def strip_assembly_comments(source: str) -> str:
     return "\n".join(lines)
 
 
+def run_binutils_step(command: list[str]) -> None:
+    """Run one GNU binutils command, raising with its diagnostics on failure.
+
+    Args:
+        command: Full argument vector to execute; `command[0]` is the tool name.
+
+    Raises:
+        ValueError: If the tool exits non-zero, carrying its captured stderr.
+    """
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise ValueError(f"{command[0]} failed: {result.stderr.strip()}")
+
+
 def assemble_x86_64(source: str, address: int) -> bytes:
-    """Assemble Intel-syntax x86-64 source with Keystone.
+    """Assemble Intel-syntax x86-64 source at a fixed virtual address with GNU binutils.
+
+    The source is assembled with `as`, located at `address` with `ld` so absolute branch
+    targets resolve to correct rel32 displacements, and reduced to raw machine code with
+    `objcopy`. This reproduces the position-dependent encoding expected at `address`.
 
     Args:
         source: Assembly source. Local labels are allowed; `#` comments are stripped first.
         address: Virtual address of the first emitted instruction, used for relative branches.
 
     Returns:
-        Exact machine-code bytes emitted by Keystone.
+        Exact machine-code bytes of the assembled `.text` section.
     """
     assert 0 <= address < 1 << 64
-    engine = keystone.Ks(keystone.KS_ARCH_X86, keystone.KS_MODE_64)
-    engine.syntax = keystone.KS_OPT_SYNTAX_INTEL
-    encoding, _ = engine.asm(strip_assembly_comments(source), address)
-    if encoding is None:
-        raise ValueError(f"Keystone produced no encoding at 0x{address:x}")
-    return bytes(encoding)
+    missing = [tool for tool in BINUTILS_TOOLS if shutil.which(tool) is None]
+    if missing:
+        raise RuntimeError(
+            f"Cannot assemble x86-64: missing GNU binutils tool(s) {', '.join(missing)} on PATH. "
+            "Install binutils (for example, add `binutils` to your Nix environment)."
+        )
+    program = ".intel_syntax noprefix\n.text\n" + strip_assembly_comments(source) + "\n"
+    with tempfile.TemporaryDirectory() as directory:
+        work = Path(directory)
+        source_path, object_path = work / "block.s", work / "block.o"
+        linked_path, binary_path = work / "block.elf", work / "block.bin"
+        source_path.write_text(program)
+        run_binutils_step(["as", "--64", "-o", str(object_path), str(source_path)])
+        run_binutils_step(["ld", f"-Ttext=0x{address:x}", "-e", "0", "-o", str(linked_path), str(object_path)])
+        run_binutils_step(["objcopy", "-O", "binary", "--only-section=.text", str(linked_path), str(binary_path)])
+        return binary_path.read_bytes()
 
 
 def place_bytes(buffer: bytearray, occupied: bytearray, offset: int, content: bytes, label: str) -> None:

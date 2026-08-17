@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
+# Model-output: Claude Fable 5
 """Regression tests for the assembly-authored Process Lasso HiDPI patch."""
 
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import os
+import shutil
 import sys
 import unittest
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "hidpi_code_legacy.bin"
+PROJECT_ROOT = Path(__file__).resolve().parent
+FIXTURE_PATH = PROJECT_ROOT / "fixtures" / "hidpi_code_legacy.bin"
 LEGACY_FIXTURE_SHA256 = "51f35d96033d951af65decef14ece59960ee3f222802d7f55002cc13e9c3aa97"
 ORIGINAL_EXE = Path(os.environ.get("PROCESS_LASSO_EXE", PROJECT_ROOT / "ProcessLasso.exe"))
-KEYSTONE_AVAILABLE = importlib.util.find_spec("keystone") is not None
 
 sys.path.insert(0, str(PROJECT_ROOT))
-import patch_process_lasso_hidpi as patcher  # noqa: E402
+import patch as patcher  # noqa: E402
+
+BINUTILS_AVAILABLE = all(shutil.which(tool) is not None for tool in patcher.BINUTILS_TOOLS)
 
 
 class AssemblyRegressionTests(unittest.TestCase):
@@ -29,7 +31,7 @@ class AssemblyRegressionTests(unittest.TestCase):
         self.assertEqual(len(legacy), patcher.LEGACY_HIDPI_CODE_SIZE)
         self.assertEqual(hashlib.sha256(legacy).hexdigest(), LEGACY_FIXTURE_SHA256)
 
-    @unittest.skipUnless(KEYSTONE_AVAILABLE, "keystone-engine is not installed")
+    @unittest.skipUnless(BINUTILS_AVAILABLE, "GNU binutils (as/ld/objcopy) not found on PATH")
     def test_each_live_block_matches_legacy_machine_code(self) -> None:
         """Assemble every live routine and require byte-for-byte parity with the old payload."""
         legacy = FIXTURE_PATH.read_bytes()
@@ -43,7 +45,7 @@ class AssemblyRegressionTests(unittest.TestCase):
                 self.assertEqual(actual, expected)
 
 
-    @unittest.skipUnless(KEYSTONE_AVAILABLE, "keystone-engine is not installed")
+    @unittest.skipUnless(BINUTILS_AVAILABLE, "GNU binutils (as/ld/objcopy) not found on PATH")
     def test_new_layout_blocks_match_independent_reference(self) -> None:
         """Pin the new reservation/gap trampolines against independently assembled bytes."""
         expected_sha256 = {
@@ -85,7 +87,7 @@ class AssemblyRegressionTests(unittest.TestCase):
                 self.assertLessEqual(block.end_offset, patcher.HIDPI_CODE_SIZE)
                 previous_end = block.end_offset
 
-    @unittest.skipUnless(KEYSTONE_AVAILABLE, "keystone-engine is not installed")
+    @unittest.skipUnless(BINUTILS_AVAILABLE, "GNU binutils (as/ld/objcopy) not found on PATH")
     def test_generated_data_references_keep_their_legacy_offsets(self) -> None:
         """Require generated strings to stay at the offsets used by RIP-relative code."""
         code = patcher.assemble_hidpi_code()
@@ -105,13 +107,13 @@ class AssemblyRegressionTests(unittest.TestCase):
             spi_name,
         )
 
-    @unittest.skipUnless(KEYSTONE_AVAILABLE, "keystone-engine is not installed")
+    @unittest.skipUnless(BINUTILS_AVAILABLE, "GNU binutils (as/ld/objcopy) not found on PATH")
     def test_removed_legacy_dead_trampoline_is_not_emitted(self) -> None:
         """Keep the previously unreachable 0x280 trampoline out of generated code."""
         code = patcher.assemble_hidpi_code()
         self.assertEqual(code[0x0280:0x02E0], b"\xCC" * 0x60)
 
-    @unittest.skipUnless(KEYSTONE_AVAILABLE, "keystone-engine is not installed")
+    @unittest.skipUnless(BINUTILS_AVAILABLE, "GNU binutils (as/ld/objcopy) not found on PATH")
     def test_rel32_jump_without_padding_is_exactly_five_bytes(self) -> None:
         """Exercise the five-byte hook case without asking Keystone to assemble empty source."""
         jump = patcher.make_rel32_jump(0x1400509DD, 0x140280050, 5)
@@ -129,7 +131,7 @@ class AssemblyRegressionTests(unittest.TestCase):
                 offset = patcher.rva_to_file_offset(layout, rva)
                 self.assertEqual(original[offset:offset + len(expected)], expected)
 
-    @unittest.skipUnless(KEYSTONE_AVAILABLE, "keystone-engine is not installed")
+    @unittest.skipUnless(BINUTILS_AVAILABLE, "GNU binutils (as/ld/objcopy) not found on PATH")
     @unittest.skipUnless(ORIGINAL_EXE.is_file(), "set PROCESS_LASSO_EXE or copy ProcessLasso.exe beside the patcher")
     def test_rebuilt_executable_is_deterministic(self) -> None:
         """Patch the same original twice and require identical output bytes."""

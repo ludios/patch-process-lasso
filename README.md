@@ -1,6 +1,6 @@
 # Process Lasso HiDPI patcher — assembly-authored edition
 
-The injected x86-64 routines in `patch.py` are written as Intel-syntax assembly and assembled at runtime with `keystone-engine`.
+The injected x86-64 routines in `patch.py` are written as Intel-syntax assembly and assembled at runtime with the GNU binutils toolchain (`as`, `ld`, and `objcopy`).
 
 The old hand-authored payload is retained only as `fixtures/hidpi_code_legacy.bin`. Its SHA-256 is pinned in the tests, and every assembly block that existed in the previous payload must still assemble byte-for-byte to its corresponding legacy range. The new layout blocks are independently assembled with GNU binutils during development and their byte hashes are pinned as a second assembler check.
 
@@ -24,14 +24,15 @@ The previous payload contained one unreachable trampoline at offsets `0x280..0x2
 
 ## Run
 
+The patcher shells out to the GNU binutils toolchain (`as`, `ld`, `objcopy`) to assemble the injected routines, so those must be on `PATH`. There are no Python package dependencies.
+
 ```sh
-python -m pip install -r requirements.txt
-python -m unittest discover -s . -v
-python patch.py ProcessLasso.exe
+python3 -m unittest discover -s . -v
+python3 patch.py ProcessLasso.exe
 ```
 
 For the tests that verify the original executable's hook sites and deterministic full rebuild, either put `ProcessLasso.exe` beside the patcher or set:
 
 ```sh
-PROCESS_LASSO_EXE=/path/to/ProcessLasso.exe python -m unittest discover -s . -v
+PROCESS_LASSO_EXE=/path/to/ProcessLasso.exe python3 -m unittest discover -s . -v
 ```
