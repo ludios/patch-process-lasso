@@ -66,7 +66,7 @@ class AssemblyRegressionTests(unittest.TestCase):
     def test_bar_height_blocks_match_independent_reference(self) -> None:
         """Pin the two tab-bar-height trampolines and their shared MulDiv helper."""
         expected_sha256 = {
-            "bar_metrics": "6e6dd982e45d23b3fbf59719687dc22e4b278d0d206933b42778b5445e37c819",
+            "bar_metrics": "3993104d02c784a448832b3cd146b58d16e4b30fc997e60f8562a6f560df07c3",
             "upper_bar_height": "1b6b3bbbd4f72bd4ff61d46c5d103f7e4109683760b4f13af89d8a2f9cac6fc2",
             "lower_bar_height": "225cec39741cb5501e3c0de3fbf31321b6750a295045335acff57fde48724d6c",
         }

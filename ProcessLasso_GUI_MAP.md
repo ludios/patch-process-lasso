@@ -831,6 +831,7 @@ These matter because a GUI patch that “works” can still be structurally brok
 8. **Avoid adding imports when dynamic resolution is sufficient.** The current patch uses existing `GetModuleHandleW`/`GetProcAddress` imports for modern DPI APIs.
 9. **Prefer semantic assembly over opcode blobs.** Current injected code is assembled with GNU binutils and regression-tested against the previous live machine code.
 10. **Treat runtime GUI flags and persisted settings as separate until proven otherwise.** The renderer has runtime flags near `+0x415d`, while named config fields are around `+0x3215`; there may be synchronization/derived-state logic between them.
+11. **Never embed an absolute VA in injected code.** The module is `DYNAMIC_BASE`/ASLR (see the manifest and `DllCharacteristics`), and the patcher emits no `.hidpi` relocations. Reach the IAT or any in-module target only via RIP-relative (`call/jmp qword ptr [rip - disp]`, `lea [rip + disp]`) or rel32 (`call/jmp 0x140280xxx`) addressing. An absolute `mov rax, 0x1401cfxxx; call [rax]` keeps the preferred VA after the loader rebases the module, so it faults at runtime — a crash that never appears in a static hash/disassembly check.
 
 Current unwind parents used by the patcher:
 

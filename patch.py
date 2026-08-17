@@ -582,7 +582,11 @@ jmp 0x140050cfd                           # original continuation
     AssemblyBlock(
         "bar_metrics",
         0x0700,
-        0x0750,
+        0x0744,
+        # The two MulDiv calls are RIP-relative through the IAT (like get_dpi), not an absolute
+        # `mov rax, imm64`: the module is DYNAMIC_BASE, so an absolute IAT address would not be
+        # relocated at load and would fault under ASLR. The displacements are specific to this
+        # block being assembled at 0x140280700; the pinned test hash guards that placement.
         r"""
 sub rsp, 0x38
 call 0x140280000                           # get_dpi(hwnd in rcx) -> eax = dpi
@@ -590,14 +594,12 @@ mov dword ptr [rsp + 0x20], eax            # save dpi
 mov ecx, 0x20
 mov edx, eax                               # dpi
 mov r8d, 0x60
-mov rax, 0x1401cf688                       # &MulDiv (USER32 IAT slot)
-call qword ptr [rax]                       # MulDiv(32, dpi, 96)
+call qword ptr [rip - 0xb1098]             # MulDiv(32, dpi, 96) via IAT 0x1401cf688
 mov dword ptr [rsp + 0x24], eax            # save scaled 32
 mov ecx, 0x16
 mov edx, dword ptr [rsp + 0x20]            # dpi
 mov r8d, 0x60
-mov rax, 0x1401cf688
-call qword ptr [rax]                       # MulDiv(22, dpi, 96) -> eax
+call qword ptr [rip - 0xb10b1]             # MulDiv(22, dpi, 96) via IAT 0x1401cf688 -> eax
 mov edx, eax                               # out: scaled 22
 mov eax, dword ptr [rsp + 0x24]            # out: scaled 32
 add rsp, 0x38
