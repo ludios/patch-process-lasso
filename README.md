@@ -2,7 +2,7 @@ All the commit messages in this repo are slop: I did not write them.
 
 To help your clanker out, copy ProcessLasso.exe and pl_rsrc_english.dll to this directory before prompting.
 
-Thanks,
+Thanks, \
 Ivan
 
 # Process Lasso HiDPI patcher
