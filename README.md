@@ -7,6 +7,10 @@ Ivan
 
 # Process Lasso HiDPI patcher
 
+This fixes https://bitsum.com/process-lasso-faq/#:~:text=gives%3F-,High,critical
+
+Screenshot: https://pbs.twimg.com/media/HP_Hn0ob0AAJZO0?format=png&name=4096x4096
+
 `patch.py` patches ProcessLasso.exe to support DPI scaling.
 
 ## Run
